@@ -1,0 +1,29 @@
+.{
+    .name = .flametui,
+    .version = "0.0.0",
+    .fingerprint = 0xa49cac35a339f9c0,
+    .minimum_zig_version = "0.16.0-dev.2223+4f16e80ce",
+    .dependencies = .{
+        .vmlinux_src = .{
+            .url = "git+https://github.com/libbpf/vmlinux.h/#75bb40ae15adf8905b49c81be3e9c02e62309f37",
+            .hash = "N-V-__8AAKxNdQCXyZjZb1V1NaA3E0dTNE6KR7EHZMWBVjFn",
+        },
+        .libbpf_src = .{
+            .url = "git+https://github.com/libbpf/libbpf#afb8b17bc50b0b7606ad4ea468cbc9f5aede8dae",
+            .hash = "N-V-__8AAL0OYQBbG2MwbqhzL8x8KTTuTZi88tJOragaq31u",
+        },
+        .libbpf = .{
+            .url = "git+https://github.com/tw4452852/libbpf_zig#f8c59e4adb68ba04f794c8f9c1e0b6a5d583a46e",
+            .hash = "libbpf-1.6.1-1-x6jL2c2eAAD_VmMTlVgQt7AeqZKlnbiRHi5QoySaclOn",
+        },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#622d245b535d15469f1d898eeadaba7056df788b",
+            .hash = "vaxis-0.5.1-BWNV_OA-CQDeFBHIx9ryyASogr2GE3FsAm-l5Ii5-HZT",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

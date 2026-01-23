@@ -3,7 +3,9 @@ const Io = std.Io;
 
 const flametui = @import("flametui");
 
-pub fn main(init: std.process.Init) !void {
-    try flametui.run_profile(init.io, init.arena.allocator()) ;
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    try flametui.run_profile(arena.allocator()) ;
 }
 

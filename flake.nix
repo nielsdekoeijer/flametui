@@ -13,7 +13,7 @@
 
     # put our zig into zls to ensure it matches
     zls-flake = {
-      url = "github:zigtools/zls?ref=master";
+      url = "github:zigtools/zls?ref=0.15.0";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.zig-overlay.follows = "zig-flake";
     };
@@ -35,7 +35,7 @@
           # use overlays
           overlays = [
             (final: prev: {
-              zig = zig-flake.packages.${system}."master";
+              zig = zig-flake.packages.${system}."0.15.1";
               zls = zls-flake.packages.${system}.default.overrideAttrs (old: {
                 nativeBuildInputs = (old.nativeBuildInputs or [ ])
                   ++ [ final.zig ];

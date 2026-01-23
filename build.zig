@@ -12,6 +12,15 @@ pub fn libbpfGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, opti
     return libbpf_dep;
 }
 
+pub fn libvaxisGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Dependency {
+     const libvaxis_dep = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    return libvaxis_dep;
+}
+
 pub fn libbpfGetSourceDependency(b: *std.Build) *std.Build.Dependency {
     return b.dependency("libbpf_src", .{});
 }
@@ -72,6 +81,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const libbpf = libbpfGetDependency(b, target, optimize);
+    const libvaxis = libvaxisGetDependency(b, target, optimize);
 
     const testModule = ebpfModuleFromCSource(b, "test", "src/bpf/test.bpf.c");
     const profileModule = ebpfModuleFromCSource(b, "profile", "src/bpf/profile.bpf.c");
@@ -94,6 +104,7 @@ pub fn build(b: *std.Build) void {
 
     ebpfAddIncludePaths(b, mod);
     mod.linkLibrary(libbpf.artifact("bpf"));
+    mod.addImport("vaxis", libvaxis.module("vaxis"));
 
     // our program
     const exe = b.addExecutable(.{

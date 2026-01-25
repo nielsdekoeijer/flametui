@@ -338,11 +338,12 @@ pub const StackTrie = struct {
 
     /// What we store in a trie for a kernel stack frame
     pub const KTrieEntry = struct {
-        kmapid: u64,
+        kmapip: u64,
     };
 
     /// What we store in a trie for a userspace stack frame
     pub const UTrieEntry = struct {
+        umapip: u64,
         umapid: u64,
     };
 
@@ -366,9 +367,6 @@ pub const StackTrie = struct {
     /// Key used for our trie
     pub const Key = struct { pid: PID, parent: ParentId, ip: InstructionPointer };
 
-    /// Kernel maps, assumed static
-    kmap: KMapUnmanaged,
-
     /// Umaps we have seen
     umap: std.ArrayListUnmanaged(UMapEntry),
 
@@ -386,7 +384,6 @@ pub const StackTrie = struct {
 
     pub fn init(allocator: std.mem.Allocator) !StackTrie {
         return StackTrie{
-            .kmap = try KMapUnmanaged.init(allocator),
             .umap = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 0),
             .umapLookup = try UMapCache.init(allocator),
             .entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0),
@@ -405,11 +402,16 @@ pub const StackTrie = struct {
         var parent: ParentId = RootId;
 
         // Resolve user stack frames
-        for (event.uips[0 .. event.ustack_sz / 8]) |entry| {
+        const ustackSize = event.ustack_sz / 8;
+        var i = ustackSize;
+        while (i > 0) {
+            i -= 1;
+            const ip = event.uips[i];
+
             const key = Key{
                 .pid = pid,
                 .parent = parent,
-                .ip = entry,
+                .ip = ip,
             };
 
             const found = self.entriesLookup.get(key);
@@ -418,7 +420,7 @@ pub const StackTrie = struct {
                 parent = @intCast(index);
             } else {
                 const umap = try self.umapLookup.find(pid);
-                const item = umap.find(entry) catch UMapUnmanaged.UMapEntryUnmapped;
+                const item = umap.find(ip) catch UMapUnmanaged.UMapEntryUnmapped;
                 try self.umap.append(self.allocator, item);
 
                 try self.entries.append(self.allocator, TrieEntry{
@@ -426,6 +428,7 @@ pub const StackTrie = struct {
                     .parent = parent,
                     .entry = TriePayload{
                         .user = .{
+                            .umapip = ip,
                             .umapid = self.umap.items.len - 1,
                         },
                     },
@@ -436,11 +439,17 @@ pub const StackTrie = struct {
         }
 
         // Resolve kernel stack frames
-        for (event.kips[0 .. event.kstack_sz / 8]) |entry| {
+
+        const kstackSize = event.kstack_sz / 8;
+        var j = kstackSize;
+        while (j > 0) {
+            j -= 1;
+            const ip = event.uips[j];
+
             const key = Key{
                 .pid = pid,
                 .parent = parent,
-                .ip = entry,
+                .ip = ip,
             };
 
             const found = self.entriesLookup.get(key);
@@ -453,7 +462,7 @@ pub const StackTrie = struct {
                     .parent = parent,
                     .entry = TriePayload{
                         .kernel = .{
-                            .kmapid = entry,
+                            .kmapip = ip,
                         },
                     },
                 });
@@ -464,7 +473,6 @@ pub const StackTrie = struct {
     }
 
     pub fn free(self: *StackTrie) void {
-        self.kmap.deinit(self.allocator);
         self.umap.deinit(self.allocator);
         self.umapLookup.deinit();
         self.entries.deinit(self.allocator);
@@ -478,7 +486,7 @@ pub const StackTrie = struct {
 pub const SharedObjectSymbol = struct {
     addr: u64,
     size: u32,
-    name: []const u8, 
+    name: []const u8,
 };
 
 pub const SharedObjectMap = struct {
@@ -489,7 +497,6 @@ pub const SharedObjectMap = struct {
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !SharedObjectMap {
         // If the path is not absolute, do not proceed
         if (!std.fs.path.isAbsolute(path)) return error.PathNotAbsolute;
-
 
         // Create list
         var symbols = try std.ArrayListUnmanaged(SharedObjectSymbol).initCapacity(allocator, 0);
@@ -662,14 +669,20 @@ pub const SymbolTrie = struct {
     /// Key used for our trie
     pub const Key = struct { parent: ParentId, symbolHash: u64 };
 
-    // Underlying flat trie
+    /// Underlying flat trie
     entries: std.ArrayListUnmanaged(TrieEntry),
 
-    // Helps us lookup indices for parent <-> child relations
+    /// Helps us lookup indices for parent <-> child relations
     entriesLookup: std.AutoArrayHashMapUnmanaged(Key, u64),
 
-    // Store our allocator, not unmanaged
+    /// Store our allocator, not unmanaged
     allocator: std.mem.Allocator,
+
+    /// Kernel maps, assumed static
+    kmap: KMapUnmanaged,
+
+    /// For loading dlls 
+    sharedObjectMapCache: SharedObjectMapCache,
 
     pub fn init(allocator: std.mem.Allocator) !SymbolTrie {
         return SymbolTrie{
@@ -680,13 +693,52 @@ pub const SymbolTrie = struct {
                 &[_]u64{},
             ),
             .allocator = allocator,
+            .kmap = try KMapUnmanaged.init(allocator),
+            .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
+    }
+
+    // add from a stacktrie
+    pub fn add(self: *SymbolTrie, stacks: StackTrie) !void {
+        const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.ParentId, SymbolTrie.ParentId);
+        const shadowMap = ShadowMap.init(self.allocator, [_]StackTrie.ParentId{}, [_]SymbolTrie.ParentId{});
+
+        // init parent
+        var parent: ParentId = RootId;
+
+        // we exploit the fact that our tree is laid out from root --> upwards
+        for (stacks.entries.items) |entry| {
+            const symbol = switch(entry.entry) {
+                .kernel => |e| blk: { 
+                    const s = try self.kmap.find(e.kmapip);
+                    break :blk s.symbol;
+                },
+                .user => |e| blk: { 
+                    const p = stacks.umap.items[e.umapid];
+                    const s = try self.sharedObjectMapCache.find(p.path);
+                    // TODO: Add sorting
+                    const q = s.find(e.umapip);
+                    break :blk s.symbol;
+                },
+            };
+
+            const key = Key {
+                .ParentId = parent,
+                .symbolHash = hash(symbol),
+            };
+            self.entries.append(self.allocator, .{
+                .hitCount = entry.hitCount,
+                .parent = parent,
+                .entry = .{
+                    .kernel = .{
+                    },
+                },
+            });
+        }
     }
 
     pub fn free(self: *SymbolTrie) void {
         self.kmap.deinit(self.allocator);
-        self.umap.deinit(self.allocator);
-        self.umapLookup.deinit();
         self.entries.deinit(self.allocator);
         self.entriesLookup.deinit(self.allocator);
     }

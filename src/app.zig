@@ -77,7 +77,10 @@ pub const KMapUnmanaged = struct {
         }.lessThan);
 
         // Sort invalid
-        if (index == self.backend.items.len or index == 0) return error.KMapEntryLookupFailure;
+        if (index == self.backend.items.len or index == 0) {
+            std.log.err("Failed to lookup KMap with ip: {}", .{ip});
+            return error.KMapEntryLookupFailure;
+        }
         return self.backend.items[index - 1];
     }
 
@@ -356,16 +359,16 @@ pub const StackTrie = struct {
     /// Our node type
     pub const TrieEntry = struct {
         hitCount: u64,
-        parent: u64,
+        parent: Id,
         entry: TriePayload,
     };
 
     /// Type for the parent index
-    pub const ParentId = u32;
-    pub const RootId: ParentId = 0;
+    pub const Id = u32;
+    pub const RootId: Id = 0;
 
     /// Key used for our trie
-    pub const Key = struct { pid: PID, parent: ParentId, ip: InstructionPointer };
+    pub const Key = struct { pid: PID, parent: Id, ip: InstructionPointer };
 
     /// Umaps we have seen
     umap: std.ArrayListUnmanaged(UMapEntry),
@@ -399,7 +402,7 @@ pub const StackTrie = struct {
     /// Add an event to the trie
     pub fn add(self: *StackTrie, event: EventType) !void {
         const pid = @as(PID, @intCast(event.pid));
-        var parent: ParentId = RootId;
+        var parent: Id = RootId;
 
         // Resolve user stack frames
         const ustackSize = event.ustack_sz / 8;
@@ -444,7 +447,7 @@ pub const StackTrie = struct {
         var j = kstackSize;
         while (j > 0) {
             j -= 1;
-            const ip = event.uips[j];
+            const ip = event.kips[j];
 
             const key = Key{
                 .pid = pid,
@@ -493,10 +496,14 @@ pub const SharedObjectMap = struct {
     mappedSharedObject: []align(std.heap.page_size_min) const u8,
     symbols: std.ArrayListUnmanaged(SharedObjectSymbol),
     allocator: std.mem.Allocator,
+    path: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !SharedObjectMap {
         // If the path is not absolute, do not proceed
-        if (!std.fs.path.isAbsolute(path)) return error.PathNotAbsolute;
+        if (!std.fs.path.isAbsolute(path)) {
+            std.log.err("Failed to load shared object from path '{s}'", .{path});
+            return error.PathNotAbsolute;
+        }
 
         // Create list
         var symbols = try std.ArrayListUnmanaged(SharedObjectSymbol).initCapacity(allocator, 0);
@@ -519,20 +526,45 @@ pub const SharedObjectMap = struct {
 
         // Create a reader
         try populate(allocator, mappedSharedObject, &symbols);
-        for (symbols.items) |symbol| {
-            std.log.info("{}", .{symbol});
-        }
+        sort(&symbols);
 
         return SharedObjectMap{
             .mappedSharedObject = mappedSharedObject,
             .symbols = symbols,
             .allocator = allocator,
+            .path = try allocator.dupe(u8, path),
         };
+    }
+
+    /// Find an entry given an instruction pointer
+    pub fn find(self: SharedObjectMap, ip: u64) !SharedObjectSymbol {
+        // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
+        const index = std.sort.upperBound(SharedObjectSymbol, self.symbols.items, ip, struct {
+            fn lessThan(lhs_ip: u64, rhs_sym: SharedObjectSymbol) std.math.Order {
+                if (lhs_ip < rhs_sym.addr) return .lt;
+                if (lhs_ip > rhs_sym.addr) return .gt;
+                return .eq;
+            }
+        }.lessThan);
+
+        // Sort invalid
+        if (index == self.symbols.items.len or index == 0) {
+            std.log.err("Failed to find ip {} in shared object '{s}'", .{ip, self.path});
+            return error.SharedObjectMapLookupFailure;
+        }
+
+        const candidate = self.symbols.items[index - 1];
+        if (ip < candidate.addr + candidate.size) {
+            return candidate;
+        }
+
+        return error.SharedObjectMapLookupFailure;
     }
 
     pub fn deinit(self: *SharedObjectMap) void {
         std.posix.munmap(self.mappedSharedObject);
         self.symbols.deinit(self.allocator);
+        self.allocator.free(self.path);
     }
 
     fn populate(allocator: std.mem.Allocator, mappedSharedObject: []align(std.heap.page_size_min) const u8, symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) !void {
@@ -573,6 +605,16 @@ pub const SharedObjectMap = struct {
                 }
             }
         }
+    }
+
+    /// Sorts the map in ascending order for binary search
+    fn sort(symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) void {
+        // Sort the map so it is easier to search at a later stage
+        std.sort.block(SharedObjectSymbol, symbols.items, {}, struct {
+            fn lessThan(_: void, a: SharedObjectSymbol, b: SharedObjectSymbol) bool {
+                return a.addr < b.addr;
+            }
+        }.lessThan);
     }
 };
 
@@ -658,22 +700,22 @@ pub const SymbolTrie = struct {
     /// Our node type
     pub const TrieEntry = struct {
         hitCount: u64,
-        parent: u64,
+        parent: Id,
         entry: TriePayload,
     };
 
     /// Type for the parent index
-    pub const ParentId = u32;
-    pub const RootId: ParentId = 0;
+    pub const Id = u32;
+    pub const RootId: Id = 0;
 
     /// Key used for our trie
-    pub const Key = struct { parent: ParentId, symbolHash: u64 };
+    pub const Key = struct { parent: Id, symbolHash: u64 };
 
     /// Underlying flat trie
     entries: std.ArrayListUnmanaged(TrieEntry),
 
     /// Helps us lookup indices for parent <-> child relations
-    entriesLookup: std.AutoArrayHashMapUnmanaged(Key, u64),
+    entriesLookup: std.AutoArrayHashMapUnmanaged(Key, Id),
 
     /// Store our allocator, not unmanaged
     allocator: std.mem.Allocator,
@@ -681,16 +723,16 @@ pub const SymbolTrie = struct {
     /// Kernel maps, assumed static
     kmap: KMapUnmanaged,
 
-    /// For loading dlls 
+    /// For loading dlls
     sharedObjectMapCache: SharedObjectMapCache,
 
     pub fn init(allocator: std.mem.Allocator) !SymbolTrie {
         return SymbolTrie{
             .entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0),
-            .entriesLookup = try std.AutoArrayHashMapUnmanaged(Key, u64).init(
+            .entriesLookup = try std.AutoArrayHashMapUnmanaged(Key, Id).init(
                 allocator,
                 &[_]Key{},
-                &[_]u64{},
+                &[_]Id{},
             ),
             .allocator = allocator,
             .kmap = try KMapUnmanaged.init(allocator),
@@ -699,41 +741,80 @@ pub const SymbolTrie = struct {
     }
 
     // add from a stacktrie
+    // NOTE: the shadowmap logic is all fucked, this is kinda complicated. We need to review this code and understand it
     pub fn add(self: *SymbolTrie, stacks: StackTrie) !void {
-        const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.ParentId, SymbolTrie.ParentId);
-        const shadowMap = ShadowMap.init(self.allocator, [_]StackTrie.ParentId{}, [_]SymbolTrie.ParentId{});
-
-        // init parent
-        var parent: ParentId = RootId;
+        // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie.
+        // * Imagine the mapping stack root --> symbol root
+        // * Imagine also that there may be multiple stack nodes with the same symboltrie key
+        const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.Id, SymbolTrie.Id);
+        var shadowMap = try ShadowMap.init(self.allocator, &[_]StackTrie.Id{}, &[_]SymbolTrie.Id{});
+        defer shadowMap.deinit(self.allocator);
 
         // we exploit the fact that our tree is laid out from root --> upwards
-        for (stacks.entries.items) |entry| {
-            const symbol = switch(entry.entry) {
-                .kernel => |e| blk: { 
+        for (0..stacks.entries.items.len) |i| {
+            const stackId: Id = @intCast(i);
+            // get stack item
+            const stackItem = stacks.entries.items[stackId];
+
+            // resolve the parent (due to the order, should be garunteed to be known)
+            const symbolParent = blk: {
+                if (stackItem.parent == StackTrie.RootId) {
+                    break :blk RootId;
+                } else {
+                    break :blk shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
+                }
+            };
+
+            // find the symbol
+            const symbol = switch (stackItem.entry) {
+                .kernel => |e| blk: {
                     const s = try self.kmap.find(e.kmapip);
-                    break :blk s.symbol;
+                    break :blk try self.allocator.dupe(u8, s.symbol);
                 },
-                .user => |e| blk: { 
+                .user => |e| blk: {
                     const p = stacks.umap.items[e.umapid];
                     const s = try self.sharedObjectMapCache.find(p.path);
-                    // TODO: Add sorting
-                    const q = s.find(e.umapip);
-                    break :blk s.symbol;
+                    const q = try s.find((e.umapip - p.addressBeg) + p.offset);
+                    break :blk try self.allocator.dupe(u8, q.name);
                 },
             };
 
-            const key = Key {
-                .ParentId = parent,
-                .symbolHash = hash(symbol),
-            };
-            self.entries.append(self.allocator, .{
-                .hitCount = entry.hitCount,
-                .parent = parent,
-                .entry = .{
-                    .kernel = .{
+            // create the key
+            const key = Key{ .parent = symbolParent, .symbolHash = hash(symbol) };
+
+            // trie update / insertion
+            const found = self.entriesLookup.get(key);
+            if (found) |symbolId| {
+                // hit
+                self.entries.items[symbolId].hitCount += 1;
+                try shadowMap.put(self.allocator, stackId, symbolId);
+            } else {
+                // create the payload depending on the trie that came in
+                const payload = blk: switch (stackItem.entry) {
+                    .kernel => break :blk TriePayload{
+                        .kernel = .{
+                            .symbol = symbol,
+                        },
                     },
-                },
-            });
+                    .user => |e| break :blk TriePayload{
+                        .user = .{
+                            .symbol = symbol,
+                            .dll = try self.allocator.dupe(u8, stacks.umap.items[e.umapid].path),
+                        },
+                    },
+                };
+
+                // append + add to map
+                try self.entries.append(self.allocator, TrieEntry{
+                    .hitCount = 1,
+                    .parent = symbolParent,
+                    .entry = payload,
+                });
+
+                const symbolId: Id = @intCast(self.entries.items.len - 1);
+                try self.entriesLookup.put(self.allocator, key, symbolId);
+                try shadowMap.put(self.allocator, stackId, symbolId);
+            }
         }
     }
 
@@ -814,10 +895,6 @@ pub const App = struct {
     }
 
     pub fn run(self: App, rate: usize, nanoseconds: u64) anyerror!void {
-        const path = "/nix/store/j193mfi0f921y0kfs8vjc1znnr45ispv-glibc-2.40-66/lib/libm.so.6";
-        var so = try SharedObjectMapCache.init(self.allocator);
-        _ = try so.find(path);
-
         // specify our perf events
         var attributes = std.os.linux.perf_event_attr{
             .type = .SOFTWARE,
@@ -845,6 +922,9 @@ pub const App = struct {
             try self.ring.poll(1);
             std.atomic.spinLoopHint();
         }
+
+        var symboltrie = try SymbolTrie.init(self.allocator);
+        try symboltrie.add(self.iptrie.*);
 
         // report how many we missed, reset it
         std.log.info("missed: {d}", .{self.missed.*});

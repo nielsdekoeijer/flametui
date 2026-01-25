@@ -1,414 +1,21 @@
 const std = @import("std");
+const bpf = @import("bpf.zig");
 const vaxis = @import("vaxis");
-const Io = std.Io;
+pub const App = @import("app.zig").App;
 
-const c = @cImport({
-    @cInclude("libbpf.h");
-    @cInclude("stdio.h");
-    @cInclude("bpf.h");
-    @cInclude("linux/perf_event.h");
-});
+const KernelSymbolResolver = @import("symbol.zig").KernelSymbolResolver;
+const UserSymbolResolver = @import("symbol.zig").UserSymbolResolver;
 
-const test_definitions = @cImport({
-    @cInclude("test.bpf.h");
-});
+const c = @import("cimport.zig").c;
 
 const profile_definitions = @cImport({
     @cInclude("profile.bpf.h");
 });
 
-// ------------------------
-// BPF helpers
-// ------------------------
-const bpf = struct {
-    fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: [*c]c.struct___va_list_tag_1) callconv(.c) c_int {
-        var buf: [512]u8 = undefined;
-        const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);
-        if (len_c == 0) {
-            return 0;
-        }
-
-        const len = @max(0, @min(@as(usize, @intCast(len_c)), buf.len) - 2);
-        if (len > 0) {
-            const slice = buf[0..len];
-            switch (level) {
-                c.LIBBPF_WARN => {
-                    std.log.warn("{s}", .{slice});
-                },
-                c.LIBBPF_INFO => {
-                    std.log.info("{s}", .{slice});
-                },
-                c.LIBBPF_DEBUG => {
-                    std.log.debug("{s}", .{slice});
-                },
-                else => {
-                    unreachable;
-                },
-            }
-        }
-
-        return len_c;
-    }
-
-    pub fn setupLoggerBackend(mode: enum { zig, none }) !void {
-        const result = switch (mode) {
-            .zig => c.libbpf_set_print(log),
-            .none => c.libbpf_set_print(null),
-        };
-
-        if (result == null) {
-            return error.LoggerUnset;
-        }
-    }
-
-    // ------------------------
-    // Represents a BPF Object
-    // ------------------------
-    const Object = struct {
-        internal: *c.struct_bpf_object,
-
-        pub fn load(mem: []const u8) anyerror!Object {
-            const obj = c.bpf_object__open_mem(@ptrCast(mem), mem.len, null) orelse return error.OpenFailure;
-            errdefer c.bpf_object__close(obj);
-
-            if (c.bpf_object__load(obj) != 0) {
-                return error.LoadFailure;
-            }
-
-            return Object{
-                .internal = obj,
-            };
-        }
-
-        pub fn attachProgramByName(self: Object, name: [*c]const u8) !Link {
-            const prog: *c.bpf_program = c.bpf_object__find_program_by_name(self.internal, name) orelse return error.ProgramNotFound;
-            // _ = c.bpf_program__attach(prog) orelse return error.AttachFailure;
-            const link = c.bpf_program__attach(prog) orelse return error.AttachFailure;
-            return Link{ .internal = link };
-        }
-
-        pub fn attachProgramPerfEventByName(
-            object: Object,
-            name: [*c]const u8,
-            cpu: usize,
-            perfEventAttributes: *std.os.linux.perf_event_attr,
-        ) anyerror!Link {
-            const prog: ?*c.bpf_program = c.bpf_object__find_program_by_name(object.internal, name) orelse return error.ProgramNotFound;
-
-            const pfd = blk: {
-                const pfd = std.os.linux.perf_event_open(perfEventAttributes, -1, @intCast(cpu), -1, 0);
-                if (pfd == 0) {
-                    return error.PerfEventOpenFailure;
-                }
-
-                break :blk pfd;
-            };
-
-            errdefer {
-                _ = std.os.linux.close(@intCast(pfd));
-            }
-            const link = c.bpf_program__attach_perf_event(prog, @intCast(pfd)) orelse return error.AttachFailure;
-            return Link{ .internal = link };
-        }
-
-        pub fn free(self: Object) void {
-            c.bpf_object__close(self.internal);
-        }
-
-        // ------------------------
-        // Link
-        // ------------------------
-        const Link = struct {
-            internal: *c.struct_bpf_link,
-
-            pub fn free(link: Link) void {
-                if (c.bpf_link__destroy(link.internal) != 0) {
-                    @panic("ebpf link destruction failure");
-                }
-            }
-        };
-
-        // ------------------------
-        // RingBufferMaps
-        // ------------------------
-        const RingBufferMap = struct {
-            rb: *c.struct_ring_buffer,
-            pub fn createCallback(comptime EventType: type, comptime handler: *const fn (EventType) void) type {
-                return struct {
-                    pub fn handlerWrapper(ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int {
-                        _ = ctx;
-                        _ = size;
-
-                        if (data) |d| {
-                            const event = @as(*const EventType, @ptrCast(@alignCast(d)));
-                            handler(event.*);
-                        }
-
-                        return 0;
-                    }
-                };
-            }
-
-            pub fn poll(self: RingBufferMap, ms: i64) !void {
-                if (c.ring_buffer__poll(self.rb, @intCast(ms)) < 0) {
-                    return error.PollFailure;
-                }
-            }
-
-            pub fn free(self: RingBufferMap) void {
-                c.ring_buffer__free(self.rb);
-            }
-        };
-
-        pub fn attachRingBufferMapCallback(
-            object: Object,
-            comptime EventType: type,
-            comptime handler: *const fn (EventType) void,
-            name: [*c]const u8,
-        ) anyerror!RingBufferMap {
-            const fd = blk: {
-                const fd = c.bpf_object__find_map_fd_by_name(object.internal, name);
-                if (fd < 0) {
-                    return error.RingBufferMapNotFound;
-                }
-
-                break :blk fd;
-            };
-
-            const cb = RingBufferMap.createCallback(EventType, handler).handlerWrapper;
-            const rb = c.ring_buffer__new(fd, cb, null, null) orelse return error.OpenFailure;
-            errdefer c.ring_buffer__free(rb);
-
-            return RingBufferMap{
-                .rb = rb,
-            };
-        }
-    };
-};
-
-// ------------------------
-// Test
-// ------------------------
-const Event = test_definitions.event;
-
-pub fn callback(event: Event) void {
-    const comm_slice = std.mem.sliceTo(&event.comm, 0);
-    std.log.info("Received Event: PID={d} COMM='{s}'", .{ event.pid, comm_slice });
-}
-
-pub fn run_test(allocator: std.mem.Allocator) anyerror!void {
-    // simple test program, just shows how it works
-    try bpf.setupLoggerBackend(.zig);
-
-    const code = try allocator.alignedAlloc(u8, .@"8", @import("test").bytecode.len);
-    defer allocator.free(code);
-
-    @memcpy(code, @import("test").bytecode);
-    const object = try bpf.Object.load(code);
-    defer object.free();
-    const map = try object.attachRingBufferMapCallback(Event, callback, "rb");
-    defer map.free();
-    const link = try object.attachProgramByName("handle_exec");
-    defer link.free();
-    while (true) {
-        try map.poll(100);
-    }
-}
-
-// ------------------------
-// Profile
-// ------------------------
-pub const KernelSymbolResolver = struct {
-    pub const Symbol = struct {
-        address: u64,
-        name: []const u8,
-
-        pub fn lessThan(_: void, lhs: Symbol, rhs: Symbol) bool {
-            return lhs.address < rhs.address;
-        }
-
-        pub fn compare(context: u64, item: Symbol) std.math.Order {
-            if (context < item.address) return .lt;
-            if (context > item.address) return .gt;
-            return .eq;
-        }
-    };
-
-    allocator: std.mem.Allocator,
-    symbols: std.ArrayListUnmanaged(Symbol),
-
-    pub fn init(allocator: std.mem.Allocator) !KernelSymbolResolver {
-        var symbols = std.ArrayListUnmanaged(Symbol){};
-
-        // build symbol table
-        const file = try std.fs.openFileAbsolute("/proc/kallsyms", .{});
-        defer file.close();
-
-        var buf: [4096]u8 = undefined;
-        var reader = file.reader(&buf);
-
-        while (true) {
-            const line = reader.interface.takeDelimiterExclusive('\n') catch break;
-            var iter = std.mem.splitScalar(u8, line, ' ');
-
-            // address
-            const address_string = iter.next() orelse continue;
-            const address = std.fmt.parseInt(u64, address_string, 16) catch continue;
-
-            // skip type
-            _ = iter.next();
-
-            // read name
-            const name_str = iter.next() orelse continue;
-            const name = try allocator.dupe(u8, name_str);
-
-            // add allocator
-            try symbols.append(allocator, .{
-                .address = address,
-                .name = name,
-            });
-        }
-
-        // sort the list for quicker lookup
-        std.mem.sort(Symbol, symbols.items, {}, Symbol.lessThan);
-
-        return KernelSymbolResolver{
-            .allocator = allocator,
-            .symbols = symbols,
-        };
-    }
-
-    pub fn free(self: KernelSymbolResolver) void {
-        for (self.symbols.items) |symbol| {
-            self.allocator.free(symbol.name);
-        }
-
-        self.symbols.clearAndFree(self.allocator);
-    }
-
-    pub fn resolve(self: KernelSymbolResolver, address: u64) ?[]const u8 {
-        // our list of symbols
-        const items = self.symbols.items;
-        if (items.len == 0) return null;
-
-        // check name of closest starting symbol
-        const index = std.sort.upperBound(Symbol, items, address, Symbol.compare);
-        if (index == 0) return null;
-
-        return items[index - 1].name;
-    }
-};
-
-pub const UserSymbolResolver = struct {
-    pub fn resolve(allocator: std.mem.Allocator, pid: u64, address: u64) !?[]const u8 {
-        // build symbol table
-        var path_buf: [128]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "/proc/{}/maps", .{pid});
-
-        const file = std.fs.openFileAbsolute(path, .{}) catch {
-            return try std.fmt.allocPrint(allocator, "map not found: {s}", .{path});
-        };
-        defer file.close();
-        var file_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(&file_buf);
-
-        while (true) {
-            // take one line
-            const line = file_reader.interface.takeDelimiterExclusive('\n') catch break;
-
-            // grab individual parts
-            var line_iter = std.mem.tokenizeAny(u8, line, " ");
-
-            // first, parse the map
-            const map = line_iter.next() orelse return error.ExpectedMap;
-            var map_iter = std.mem.splitScalar(u8, map, '-');
-            const map_beg_string = map_iter.next() orelse return error.ExpectedMapBeg;
-            const map_end_string = map_iter.next() orelse return error.ExpectedMapEnd;
-            const map_beg = try std.fmt.parseInt(u64, map_beg_string, 16);
-            const map_end = try std.fmt.parseInt(u64, map_end_string, 16);
-
-            // if we are within the maps bounds, we are inside the specified
-            if (map_beg <= address and address <= map_end) {
-
-                // perms, no use for it now
-                const perms = line_iter.next() orelse return error.ExpectedPermissions;
-                _ = perms;
-
-                // offset,
-                const offset_string = line_iter.next() orelse return error.ExpectedOffset;
-                const offset = try std.fmt.parseInt(u64, offset_string, 16);
-
-                // skips
-                const device = line_iter.next() orelse return error.ExpectedDevice;
-                _ = device;
-
-                const inode = line_iter.next() orelse return error.ExpectedInode;
-                _ = inode;
-
-                // name
-                const dll_path = line_iter.rest();
-                if (dll_path.len == 0) continue;
-                if (std.fs.path.isAbsolute(dll_path)) {
-                    const dll = try std.fs.openFileAbsolute(dll_path, .{});
-                    defer dll.close();
-                    var dll_buf: [512]u8 = undefined;
-                    var dll_reader = dll.reader(&dll_buf);
-
-                    const header = try std.elf.Header.read(&dll_reader.interface);
-                    const ip = (address - map_beg) + offset;
-
-                    // if ET_EXEC is set its not PIE
-                    const lookup_addr = if (header.type == std.elf.ET.EXEC) address else ip;
-
-                    // foreach header
-                    var section_iter = header.iterateSectionHeaders(&dll_reader);
-                    while (section_iter.next() catch break) |section| {
-
-                        // only look for .symtab and .dyntab secntions
-                        if (section.sh_type == std.elf.SHT_SYMTAB or section.sh_type == std.elf.SHT_DYNSYM) {
-                            const symbol_count = section.sh_size / section.sh_entsize;
-
-                            // go to the section in the code
-                            try dll_reader.seekTo(section.sh_offset);
-
-                            // find the closest symbol, we do this cause sometimes symbols don't define their size
-                            for (0..symbol_count) |_| {
-
-                                // read a symbol
-                                const symbol = try dll_reader.interface.takeStruct(std.elf.Elf64_Sym, header.endian);
-
-                                // check if we're inside for exact match
-                                if (symbol.st_size > 0) {
-                                    if (lookup_addr >= symbol.st_value and lookup_addr < symbol.st_value + symbol.st_size) {
-                                        const strtab_shdr_offset = header.shoff + (section.sh_link * header.shentsize);
-                                        try dll_reader.seekTo(strtab_shdr_offset);
-
-                                        const strtab_shdr = try dll_reader.interface.takeStruct(std.elf.Elf64_Shdr, header.endian);
-                                        try dll_reader.seekTo(strtab_shdr.sh_offset + symbol.st_name);
-
-                                        return try allocator.dupe(u8, try dll_reader.interface.peekDelimiterExclusive(0));
-                                    }
-                                }
-                            }
-
-                            // std.log.debug("could not find exact match in section", .{});
-                            continue;
-                        }
-                    }
-                } else {
-                    return try std.fmt.allocPrint(allocator, "dll not found: {s}", .{dll_path});
-                }
-            }
-        }
-
-        return try std.fmt.allocPrint(allocator, "???", .{});
-    }
-};
-
 const VaxisEvent = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
-    // mouse: vaxis.Mouse,
+    mouse: vaxis.Mouse,
 };
 
 pub const StackFrame = struct {
@@ -419,28 +26,36 @@ pub const StackFrame = struct {
         Root,
     };
 
+    pub const Status = enum {
+        Found,
+        Unknown,
+    };
+
     symbol: []const u8,
-    // module: []const u8,
-    // address: u64,
+    pid: ?u64,
+    address: u64,
     kind: FrameKind,
 };
 
+/// Trie containing our measurement
 pub const CallGraphNode = struct {
     frame: StackFrame,
-    hit_count: u64,
+    hitCount: u64,
     children: std.StringHashMap(CallGraphNode),
     allocator: std.mem.Allocator,
 
     pub fn insert(self: *CallGraphNode, frames: []const StackFrame) !void {
-        self.hit_count += 1;
+        self.hitCount += 1;
 
         if (frames.len == 0) return;
 
-        const current_frame = frames[0];
+        var current_frame = frames[0];
         const remaining = frames[1..];
 
         const result = try self.children.getOrPut(current_frame.symbol);
         if (!result.found_existing) {
+            // ensure we own
+            current_frame.symbol = try self.allocator.dupe(u8, current_frame.symbol);
             result.value_ptr.* = try CallGraphNode.init(self.allocator, current_frame);
         }
 
@@ -451,7 +66,7 @@ pub const CallGraphNode = struct {
         return CallGraphNode{
             .allocator = allocator,
             .frame = frame,
-            .hit_count = 0,
+            .hitCount = 0,
             .children = std.StringHashMap(CallGraphNode).init(allocator),
         };
     }
@@ -465,32 +80,156 @@ pub const CallGraphNode = struct {
         self.children.deinit();
     }
 
+    pub fn getChildrenCount(self: CallGraphNode) usize {
+        return self.children.count();
+    }
+
     fn sortNodesDescending(_: void, lhs: *CallGraphNode, rhs: *CallGraphNode) bool {
-        return lhs.hit_count > rhs.hit_count;
+        return lhs.hitCount > rhs.hitCount;
     }
 };
 
 pub const FlameGraph = struct {
     allocator: std.mem.Allocator,
+    nodes: []FlameGraphNode,
+    childCount: usize,
+    hitCountTotal: u64,
 
     const FlameGraphNode = struct {
-        level: u32,
-        hitCount: u32,
+        level: usize,
+        width: f32,
+        offset: f32,
         symbol: []const u8,
+        kind: StackFrame.FrameKind,
+        hitCount: u64,
+        pid: ?u64, 
+
+        fn sort(_: void, lhs: FlameGraphNode, rhs: FlameGraphNode) bool {
+            if (lhs.level == rhs.level) {
+                return std.mem.order(u8, lhs.symbol, rhs.symbol) == .lt;
+            } else return lhs.level < rhs.level;
+        }
     };
 
-    pub fn init(node: CallGraphNode, allocator: std.mem.Allocator) FlameGraph {
+    fn populateRecursive(
+        self: *FlameGraph,
+        node: CallGraphNode,
+        list: *std.ArrayListUnmanaged(FlameGraphNode),
+        level: usize,
+        initialOffset: f32,
+        initialWidth: f32,
+    ) !void {
+        var offset = initialOffset;
+        if (node.children.count() > 0) {
+            var childrenIt = node.children.iterator();
+            while (true) {
+                if (childrenIt.next()) |child| {
+                    self.childCount += 1;
+
+                    const width = (@as(f32, @floatFromInt(child.value_ptr.hitCount)) / @as(f32, @floatFromInt(node.hitCount))) * initialWidth;
+                    try self.populateRecursive(child.value_ptr.*, list, level + 1, offset, width);
+
+                    try list.append(
+                        self.allocator,
+                        FlameGraphNode{
+                            .level = level,
+                            .symbol = child.value_ptr.frame.symbol,
+                            .offset = offset,
+                            .width = width,
+                            .kind = child.value_ptr.frame.kind,
+                            .hitCount = child.value_ptr.hitCount,
+                            .pid = child.value_ptr.frame.pid,
+                        },
+                    );
+
+                    offset += width;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn init(allocator: std.mem.Allocator, node: CallGraphNode) !FlameGraph {
+        var self = FlameGraph{
+            .allocator = allocator,
+            .nodes = &[_]FlameGraphNode{},
+            .childCount = 0,
+            .hitCountTotal = node.hitCount,
+        };
+
+        var list = try std.ArrayListUnmanaged(FlameGraphNode).initCapacity(allocator, 0);
+        try self.populateRecursive(node, &list, 1, 0.0, 1.0);
+        try list.append(
+            self.allocator,
+            FlameGraphNode{
+                .level = 0,
+                .symbol = node.frame.symbol,
+                .offset = 0,
+                .width = 1,
+                .kind = .Root,
+                .hitCount = node.hitCount,
+                .pid = null,
+            },
+        );
+        self.nodes = try list.toOwnedSlice(allocator);
+
+        std.mem.sort(FlameGraphNode, self.nodes, {}, FlameGraphNode.sort);
+
+        return self;
     }
 };
 
-pub const FlamegraphWidget = struct {
-    root: *CallGraphNode,
+fn lerpColor(a: vaxis.Color, b: vaxis.Color, t: f32) vaxis.Color {
+    return .{
+        .rgb = .{
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[0])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[0])) * t),
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[1])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[1])) * t),
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[2])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[2])) * t),
+        },
+    };
+}
+
+fn dimColor(color: vaxis.Color, factor: f32) vaxis.Color {
+    switch (color) {
+        .rgb => |rgb| {
+            return .{
+                .rgb = .{
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * factor),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * factor),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * factor),
+                },
+            };
+        },
+
+        else => return color,
+    }
+}
+
+pub const FlameGraphInterface = struct {
+    const graphPaddingWBeg: u16 = 2;
+    const graphPaddingWEnd: u16 = 2;
+    const graphPaddingHBeg: u16 = 2;
+    const graphPaddingHEnd: u16 = 7;
+
+    root: *FlameGraph,
     allocator: std.mem.Allocator,
     text_color: vaxis.Color = .{ .rgb = .{ 0x00, 0x00, 0x00 } },
     bg_grad_beg: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xB0 } },
     bg_grad_end: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xEE } },
+    infoBuf0: [512]u8 = std.mem.zeroes([512]u8),
+    infoBuf1: [512]u8 = std.mem.zeroes([512]u8),
+    infoBuf2: [512]u8 = std.mem.zeroes([512]u8),
 
-    pub fn clearBackground(self: *FlamegraphWidget, win: vaxis.Window) !void {
+    pub fn init(allocator: std.mem.Allocator, root: *FlameGraph) FlameGraphInterface {
+        return .{
+            .allocator = allocator,
+            .root = root,
+        };
+    }
+
+    /// Clears the background with a gradient
+    pub fn clearBackground(self: FlameGraphInterface, win: vaxis.Window) !void {
         const h = win.height;
         const w = win.width;
 
@@ -506,12 +245,46 @@ pub const FlamegraphWidget = struct {
         }
     }
 
+    fn drawCellOverBackground(self: FlameGraphInterface, win: vaxis.Window, x: u16, y: u16, char: []const u8, style: vaxis.Style) void {
+        _ = self;
+        if (win.readCell(x, y)) |bg_cell| {
+            var s = style;
+            s.bg = bg_cell.style.bg;
+            win.writeCell(x, y, .{
+                .char = .{ .grapheme = char },
+                .style = s,
+            });
+        }
+    }
+
+    fn drawBorder(self: FlameGraphInterface, window: vaxis.Window, x1: u16, y1: u16, x2: u16, y2: u16, color: vaxis.Color) void {
+        const style = vaxis.Style{
+            .fg = color,
+        };
+
+        self.drawCellOverBackground(window, x1, y1, "┏", style);
+        self.drawCellOverBackground(window, x2, y1, "┓", style);
+        self.drawCellOverBackground(window, x1, y2, "┗", style);
+        self.drawCellOverBackground(window, x2, y2, "┛", style);
+
+        for ((x1 + 1)..x2) |x| {
+            self.drawCellOverBackground(window, @intCast(x), y1, "━", style);
+            self.drawCellOverBackground(window, @intCast(x), y2, "━", style);
+        }
+
+        for ((y1 + 1)..y2) |y| {
+            self.drawCellOverBackground(window, x1, @intCast(y), "┃", style);
+            self.drawCellOverBackground(window, x2, @intCast(y), "┃", style);
+        }
+    }
+
     /// Simplified from brendan greg's version
     pub fn hashName(name: []const u8, reverse: bool) f32 {
         var vector: f32 = 0;
         var weight: f32 = 1;
         var max: f32 = 1;
         var mod: f32 = 10;
+
 
         for (0..name.len) |i| {
             const idx = blk: {
@@ -538,9 +311,10 @@ pub const FlamegraphWidget = struct {
         return (1.0 - (vector / max));
     }
 
+    /// Colors using greg's original version
     pub fn getColorFromName(name: []const u8) vaxis.Color {
-        const v1 = hashName(name, false);
-        const v2 = hashName(name, true);
+        const v1 = hashName(name, true);
+        const v2 = hashName(name, false);
         const v3 = v2;
 
         return .{
@@ -552,115 +326,116 @@ pub const FlamegraphWidget = struct {
         };
     }
 
-    pub fn init(allocator: std.mem.Allocator, root: *CallGraphNode) FlamegraphWidget {
-        return .{
-            .allocator = allocator,
-            .root = root,
-        };
-    }
-
-    /// The main entry point to draw the widget into a specific window
-    pub fn draw(self: *FlamegraphWidget, win: vaxis.Window) !void {
-        if (self.root.hit_count == 0) return;
-        const marginW = 4;
-        const width = @as(f32, @floatFromInt(win.width - marginW));
-        const samples_total = @as(f32, @floatFromInt(self.root.hit_count));
-
+    pub fn draw(self: *FlameGraphInterface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
         try self.clearBackground(win);
-        try self.renderNode(win, self.root, marginW / 2, win.height - 5, width, samples_total, 0);
-    }
 
-    fn renderNode(
-        self: *FlamegraphWidget,
-        win: vaxis.Window,
-        node: *CallGraphNode,
-        x_start: f32,
-        y_pos: usize,
-        total_screen_width: f32,
-        total_root_samples: f32,
-        depth: usize,
-    ) !void {
-        // const ratio = @as(f32, @floatFromInt(node.hit_count)) / total_root_samples;
-        // const width: usize = @intFromFloat(@floor(ratio * total_screen_width));
-        const ratio = @as(f32, @floatFromInt(node.hit_count)) / total_root_samples;
-        const x_end = x_start + (ratio * total_screen_width);
-        const draw_x_start: usize = @intFromFloat(x_start);
-        const draw_x_end: usize = @intFromFloat(x_end);
-        const width = draw_x_end -| draw_x_start;
+        if (win.width <= graphPaddingWBeg + graphPaddingWEnd or win.height <= graphPaddingHBeg + graphPaddingHEnd) return;
 
-        // if bar is less than 1 wide, we skip
-        if (width < 1) {
-            return;
-        }
+        self.drawBorder(win, graphPaddingWBeg - 1, graphPaddingHBeg - 1, win.width - graphPaddingWEnd + 1, win.height - graphPaddingHEnd + 1, self.text_color);
 
-        // define the style
-        const style: vaxis.Style = .{
-            .fg = self.text_color,
-            .bg = getColorFromName(node.frame.symbol),
-            .bold = true,
-        };
+        // rest
+        const localW = @as(f32, @floatFromInt(win.width - (graphPaddingWBeg + graphPaddingWEnd))) + 1;
+        const localH = win.height - (graphPaddingHBeg + graphPaddingHEnd);
+        for (self.root.nodes) |node| {
+            const start_f = localW * node.offset;
+            const end_f = localW * (node.offset + node.width);
+            const X = @as(u16, @intFromFloat(start_f)) + graphPaddingWBeg;
+            const end_x = @as(u16, @intFromFloat(end_f)) + graphPaddingWEnd;
+            const W = end_x - X;
 
-        for (0..width) |i| {
-            var char_content: []const u8 = " ";
+            if (W == 0) continue;
+            if (node.level > localH) continue;
+            const Y = localH - @as(u16, @intCast(node.level)) + graphPaddingHBeg;
 
-            if (i == 0 and width > 1) {
-                char_content = " ";
-            } else if (i < node.frame.symbol.len + 1) {
-                const char_idx = i -| 1;
-                if (char_idx < node.frame.symbol.len) {
-                    char_content = node.frame.symbol[char_idx .. char_idx + 1];
+            // detect hover
+            const hovered: bool = if (mouse) |m| m.row == Y and m.col >= X and m.col < end_x else false;
+
+            const style: vaxis.Style = blk: {
+                if (hovered) {
+                    break :blk .{
+                        .fg = self.text_color,
+                        .bg = dimColor(getColorFromName(node.symbol), 0.9),
+                        .bold = true,
+                    };
                 }
-            }
 
-            if (@as(usize, @intFromFloat(x_start)) + i < win.width and y_pos > 0 and y_pos < win.height) {
-                win.writeCell(@intCast(@as(usize, @intFromFloat(x_start)) + i), @intCast(y_pos), .{
-                    .char = .{ .grapheme = char_content },
+                break :blk .{
+                    .fg = self.text_color,
+                    .bg = getColorFromName(node.symbol),
+                    .bold = false,
+                };
+            };
+
+            var count: usize = 0;
+            for (X..end_x) |x| {
+                var char: []const u8 = " ";
+                if (count > 0 and count < W - 1) {
+                    if (count - 1 < node.symbol.len) {
+                        char = node.symbol[count - 1 .. count];
+                    }
+                }
+
+                win.writeCell(@as(u16, @intCast(x)), Y, .{
+                    .char = .{ .grapheme = char },
                     .style = style,
                 });
+                count += 1;
+            }
+
+            if (hovered) {
+                {
+                    self.infoBuf0 = @splat(0);
+                    const str = try std.fmt.bufPrint(&self.infoBuf0, "name: {s}", .{node.symbol});
+                    for (0..str.len) |i| {
+                        self.drawCellOverBackground(
+                            win,
+                            @as(u16, @intCast(graphPaddingWBeg + i)),
+                            win.height - graphPaddingHEnd + 2,
+                            str[i .. i + 1],
+                            .{
+                                .fg = self.text_color,
+                                .bold = true,
+                            },
+                        );
+                    }
+                }
+                {
+                    self.infoBuf1 = @splat(0);
+                    const percentage = @as(f32, @floatFromInt(node.hitCount)) / @as(f32, @floatFromInt(self.root.hitCountTotal)) * 100.0;
+                    const str = try std.fmt.bufPrint(&self.infoBuf1, "hits: {} / {} ({:2.2}%)", .{ node.hitCount, self.root.hitCountTotal, percentage });
+
+                    for (0..str.len) |i| {
+                        self.drawCellOverBackground(
+                            win,
+                            @as(u16, @intCast(graphPaddingWBeg + i)),
+                            win.height - graphPaddingHEnd + 3,
+                            str[i .. i + 1],
+                            .{
+                                .fg = self.text_color,
+                                .bold = true,
+                            },
+                        );
+                    }
+                }
+                {
+                    self.infoBuf2 = @splat(0);
+                    const str = try std.fmt.bufPrint(&self.infoBuf2, "kind: {s}:{}", .{@tagName(node.kind), if (node.pid) |pid| pid else 0});
+
+                    for (0..str.len) |i| {
+                        self.drawCellOverBackground(
+                            win,
+                            @as(u16, @intCast(graphPaddingWBeg + i)),
+                            win.height - graphPaddingHEnd + 4,
+                            str[i .. i + 1],
+                            .{
+                                .fg = self.text_color,
+                                .bold = true,
+                            },
+                        );
+                    }
+                }
             }
         }
-
-        // D. Sort Children (Crucial for UI stability!)
-        // HashMaps are unordered. If we don't sort, the bars will "dance" randomly.
-        var child_list = try std.ArrayList(*CallGraphNode).initCapacity(self.allocator, 0);
-        defer child_list.deinit(self.allocator);
-
-        var iter = node.children.iterator();
-        while (iter.next()) |entry| {
-            try child_list.append(self.allocator, entry.value_ptr);
-        }
-
-        // Sort by hit_count descending (Widest bars on the left)
-        std.mem.sort(*CallGraphNode, child_list.items, {}, CallGraphNode.sortNodesDescending);
-
-        // E. Recurse to Children
-        var current_x_offset = x_start;
-
-        // If we are at the top of the screen, stop recursion
-        if (y_pos == 0) return;
-
-        for (child_list.items) |child| {
-
-            // Advance X offset by this child's width
-            const child_ratio = @as(f32, @floatFromInt(child.hit_count)) / total_root_samples;
-            const child_width_f = child_ratio * total_screen_width;
-
-            try self.renderNode(win, child, current_x_offset, y_pos - 1, // Move UP the screen
-                total_screen_width, total_root_samples, // Keep denominator constant to maintain proportion
-                depth + 1);
-
-            current_x_offset += child_width_f;
-        }
-    }
-
-    fn lerpColor(c1: vaxis.Color, c2: vaxis.Color, t: f32) vaxis.Color {
-        return .{
-            .rgb = .{
-                @intFromFloat(@as(f32, @floatFromInt(c1.rgb[0])) * (1.0 - t) + @as(f32, @floatFromInt(c2.rgb[0])) * t),
-                @intFromFloat(@as(f32, @floatFromInt(c1.rgb[1])) * (1.0 - t) + @as(f32, @floatFromInt(c2.rgb[1])) * t),
-                @intFromFloat(@as(f32, @floatFromInt(c1.rgb[2])) * (1.0 - t) + @as(f32, @floatFromInt(c2.rgb[2])) * t),
-            },
-        };
     }
 };
 
@@ -668,10 +443,8 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
     // try bpf.setupLoggerBackend(.zig);
     try bpf.setupLoggerBackend(.none);
 
-    const code = try allocator.alignedAlloc(u8, .@"8", @import("profile").bytecode.len);
+    const code = try bpf.loadProgramAligned(allocator, @import("profile").bytecode);
     defer allocator.free(code);
-
-    @memcpy(code, @import("profile").bytecode);
 
     const object = try bpf.Object.load(code);
     defer object.free();
@@ -720,9 +493,10 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
     var root = try CallGraphNode.init(allocator, .{
         .kind = .Root,
         .symbol = "root",
+        .pid = null,
+        .address = 0,
     });
 
-    std.log.info("Iterating over maps...", .{});
     while (c.bpf_map_get_next_key(counts_fd, prev_key, &next_key) == 0) {
         curr_key = next_key;
         prev_key = &curr_key;
@@ -744,9 +518,12 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
                         allocator,
                         StackFrame{
                             .symbol = symbol,
-                            .kind = .Kernel,
+                            .kind = .User,
+                            .address = stack_ips[i],
+                            .pid = curr_key.pid,
                         },
                     );
+                    count += 1;
                 }
             } else {
                 // std.log.warn(" --> [USER][{d:3}] Stack ID missing", .{curr_key.user_stack_id});
@@ -766,6 +543,8 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
                         StackFrame{
                             .symbol = symbol,
                             .kind = .Kernel,
+                            .address = stack_ips[i],
+                            .pid = null,
                         },
                     );
                 }
@@ -789,11 +568,14 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
     try loop.start();
     defer loop.stop();
 
+    try vx.setMouseMode(tty.writer(), true);
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
 
-    var flamegraph = FlamegraphWidget.init(allocator, &root);
+    var flamegraph = try FlameGraph.init(allocator, root);
+    var interface = FlameGraphInterface.init(allocator, &flamegraph);
 
+    var mouse: ?vaxis.Mouse = null;
     while (true) {
         const event = loop.nextEvent();
 
@@ -806,13 +588,14 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
             .winsize => |winsize| {
                 try vx.resize(allocator, tty.writer(), winsize);
             },
+            .mouse => |m| {
+                mouse = m;
+            },
         }
 
         const win = vx.window();
 
-        // 4. Draw
-        try flamegraph.draw(win);
-
+        try interface.draw(win, mouse);
         try vx.render(tty.writer());
     }
 }

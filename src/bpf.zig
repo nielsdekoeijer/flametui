@@ -127,6 +127,12 @@ pub const Object = struct {
             }
         }
 
+        pub fn consume(self: RingBufferMap) !void {
+            if (c.ring_buffer__consume(self.rb) < 0) {
+                return error.ConsumeFailure; 
+            }
+        }
+
         pub fn free(self: RingBufferMap) void {
             c.ring_buffer__free(self.rb);
         }

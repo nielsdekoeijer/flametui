@@ -151,6 +151,14 @@ pub const UMapEntry = struct {
 
 /// Model of the symbols in /proc/*/maps
 pub const UMapUnmanaged = struct {
+    const Internal = union((enum { loaded, unmapped })) {
+        loaded: struct {
+            /// Kernel map, a model of /proc/kallsyms
+            backend: std.ArrayListUnmanaged(UMapEntry),
+        },
+        unmapped: struct {},
+    };
+
     /// A fixed type that can be used as a fallback on error
     pub const UMapEntryUnmapped = UMapEntry{
         .path = "Unmapped",
@@ -159,8 +167,7 @@ pub const UMapUnmanaged = struct {
         .addressEnd = 0,
     };
 
-    /// Kernel map, a model of /proc/kallsyms
-    backend: std.ArrayListUnmanaged(UMapEntry),
+    internal: Internal,
 
     /// Constructor
     pub fn init(allocator: std.mem.Allocator, pid: PID) !UMapUnmanaged {
@@ -174,7 +181,13 @@ pub const UMapUnmanaged = struct {
         const file = blk: {
             var pathBuffer: [128]u8 = undefined;
             const path = try std.fmt.bufPrint(&pathBuffer, "/proc/{}/maps", .{pid});
-            break :blk try std.fs.openFileAbsolute(path, .{});
+            // It can happen that while we're starting, a process dies. Then we can't load it. In which case we
+            // return this "unloaded".
+            break :blk std.fs.openFileAbsolute(path, .{}) catch return UMapUnmanaged{
+                .internal = .{
+                    .unmapped = .{},
+                },
+            };
         };
         defer file.close();
 
@@ -185,31 +198,56 @@ pub const UMapUnmanaged = struct {
         sort(&backend);
 
         return UMapUnmanaged{
-            .backend = backend,
+            .internal = .{
+                .loaded = .{
+                    .backend = backend,
+                },
+            },
         };
     }
 
-    /// Find an entry given an instruction pointer
-    pub fn find(self: UMapUnmanaged, ip: InstructionPointer) !UMapEntry {
-        // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
-        const index = std.sort.upperBound(UMapEntry, self.backend.items, ip, struct {
-            fn lessThan(lhs_ip: u64, rhs_map: UMapEntry) std.math.Order {
-                if (lhs_ip < rhs_map.addressBeg) return .lt;
-                if (lhs_ip > rhs_map.addressBeg) return .gt;
-                return .eq;
-            }
-        }.lessThan);
+    /// Result of a `find` operation
+    pub const UMapEntryResult = union((enum { found, notfound, unmapped })) {
+        found: UMapEntry,
+        notfound: struct {},
+        unmapped: struct {},
+    };
 
-        // Ensure sane output
-        if (index == self.backend.items.len or index == 0) return error.UMapEntryLookupFailure;
-        if (self.backend.items[index - 1].addressEnd < ip) return error.UMapEntryLookupFailure;
-        return self.backend.items[index - 1];
+    /// Find an entry given an instruction pointer
+    pub fn find(self: UMapUnmanaged, ip: InstructionPointer) UMapEntryResult {
+        switch (self.internal) {
+            .loaded => |s| {
+                // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
+                const index = std.sort.upperBound(UMapEntry, s.backend.items, ip, struct {
+                    fn lessThan(lhs_ip: u64, rhs_map: UMapEntry) std.math.Order {
+                        if (lhs_ip < rhs_map.addressBeg) return .lt;
+                        if (lhs_ip > rhs_map.addressBeg) return .gt;
+                        return .eq;
+                    }
+                }.lessThan);
+
+                // Ensure sane output
+                if (index == s.backend.items.len or index == 0) return .{ .notfound = .{} };
+                if (s.backend.items[index - 1].addressEnd < ip) return .{ .notfound = .{} };
+                return .{ .found = s.backend.items[index - 1] };
+            },
+            .unmapped => {
+                return UMapEntryResult{
+                    .unmapped = .{},
+                };
+            },
+        }
     }
 
     /// Destructor
     pub fn deinit(self: *UMapUnmanaged, allocator: std.mem.Allocator) void {
-        for (self.backend.items) |item| allocator.free(item.path);
-        self.backend.deinit(allocator);
+        switch (self.internal) {
+            .loaded => |*s| {
+                for (s.backend.items) |item| allocator.free(item.path);
+                s.backend.deinit(allocator);
+            },
+            else => {},
+        }
     }
 
     // populates the map from e.g. a file
@@ -307,8 +345,9 @@ pub const UMapCache = struct {
             }
         }
 
-        // If not found, create one
-        try self.backend.put(self.allocator, pid, try UMapUnmanaged.init(self.allocator, pid));
+        // If not found, create one.
+        const map = try UMapUnmanaged.init(self.allocator, pid);
+        try self.backend.put(self.allocator, pid, map);
 
         // Find it
         {
@@ -423,7 +462,12 @@ pub const StackTrie = struct {
                 parent = @intCast(index);
             } else {
                 const umap = try self.umapLookup.find(pid);
-                const item = umap.find(ip) catch UMapUnmanaged.UMapEntryUnmapped;
+                const item = switch (umap.find(ip)) {
+                    .found => |it| it,
+                    .notfound => UMapUnmanaged.UMapEntryUnmapped,
+                    .unmapped => UMapUnmanaged.UMapEntryUnmapped,
+                };
+
                 try self.umap.append(self.allocator, item);
 
                 try self.entries.append(self.allocator, TrieEntry{
@@ -493,23 +537,42 @@ pub const SharedObjectSymbol = struct {
 };
 
 pub const SharedObjectMap = struct {
-    mappedSharedObject: []align(std.heap.page_size_min) const u8,
-    symbols: std.ArrayListUnmanaged(SharedObjectSymbol),
-    allocator: std.mem.Allocator,
-    path: []const u8,
+    const Internal = union((enum { loaded, unmapped })) {
+        loaded: struct {
+            mappedSharedObject: []align(std.heap.page_size_min) const u8,
+            symbols: std.ArrayListUnmanaged(SharedObjectSymbol),
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            object: std.elf.ET,
+        },
+        unmapped: struct {},
+    };
+
+    internal: Internal,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !SharedObjectMap {
         // If the path is not absolute, do not proceed
         if (!std.fs.path.isAbsolute(path)) {
-            std.log.err("Failed to load shared object from path '{s}'", .{path});
-            return error.PathNotAbsolute;
+            return SharedObjectMap{
+                .internal = .{
+                    .unmapped = .{},
+                },
+            };
         }
 
         // Create list
         var symbols = try std.ArrayListUnmanaged(SharedObjectSymbol).initCapacity(allocator, 0);
 
         // Open file
-        const file = try std.fs.openFileAbsolute(path, .{});
+        const file = std.fs.openFileAbsolute(path, .{}) catch {
+            // this means either the path we obtained is not valid, or it seized to exist since our first check
+            // TODO: there are edge cases here, probably we want to log a bit to learn what they are
+            return SharedObjectMap{
+                .internal = .{
+                    .unmapped = .{},
+                },
+            };
+        };
         defer file.close();
 
         // Get file details and mmap
@@ -525,40 +588,86 @@ pub const SharedObjectMap = struct {
         errdefer std.posix.munmap(mappedSharedObject);
 
         // Create a reader
-        try populate(allocator, mappedSharedObject, &symbols);
+        populate(allocator, mappedSharedObject, &symbols) catch {
+            // its possible for this to fail, I'm not quite sure why that happens
+            return SharedObjectMap{
+                .internal = .{
+                    .unmapped = .{},
+                },
+            };
+        };
+
         sort(&symbols);
 
         return SharedObjectMap{
-            .mappedSharedObject = mappedSharedObject,
-            .symbols = symbols,
-            .allocator = allocator,
-            .path = try allocator.dupe(u8, path),
+            .internal = .{
+                .loaded = .{
+                    .mappedSharedObject = mappedSharedObject,
+                    .symbols = symbols,
+                    .allocator = allocator,
+                    .path = try allocator.dupe(u8, path),
+                    .object = try queryObjectType(mappedSharedObject),
+                },
+            },
         };
     }
 
-    /// Find an entry given an instruction pointer
-    pub fn find(self: SharedObjectMap, ip: u64) !SharedObjectSymbol {
-        // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
-        const index = std.sort.upperBound(SharedObjectSymbol, self.symbols.items, ip, struct {
-            fn lessThan(lhs_ip: u64, rhs_sym: SharedObjectSymbol) std.math.Order {
-                if (lhs_ip < rhs_sym.addr) return .lt;
-                if (lhs_ip > rhs_sym.addr) return .gt;
-                return .eq;
-            }
-        }.lessThan);
+    /// Result of a `find` operation
+    pub const SharedObjectSymbolResult = union((enum { found, notfound, unmapped })) {
+        found: SharedObjectSymbol,
+        notfound: struct {},
+        unmapped: struct {},
+    };
 
-        // Sort invalid
-        if (index == self.symbols.items.len or index == 0) {
-            std.log.err("Failed to find ip {} in shared object '{s}'", .{ip, self.path});
-            return error.SharedObjectMapLookupFailure;
+    /// Find an entry given an instruction pointer, or null if this instance wasn't mapped
+    pub fn find(self: SharedObjectMap, ipRaw: u64, uentry: UMapEntry) SharedObjectSymbolResult {
+        switch (self.internal) {
+            .loaded => |s| {
+                // The IP we should use depends on what we get here
+                const ip = blk: {
+                    if (s.object == std.elf.ET.EXEC) {
+                        break :blk ipRaw;
+                    } else {
+                        break :blk ipRaw - uentry.addressBeg + uentry.offset;
+                    }
+                };
+
+                // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
+                const index = std.sort.upperBound(SharedObjectSymbol, s.symbols.items, ip, struct {
+                    fn lessThan(lhs_ip: u64, rhs_sym: SharedObjectSymbol) std.math.Order {
+                        if (lhs_ip < rhs_sym.addr) return .lt;
+                        if (lhs_ip > rhs_sym.addr) return .gt;
+                        return .eq;
+                    }
+                }.lessThan);
+
+                // Sort invalid
+                if (index == s.symbols.items.len or index == 0) {
+                    return .{ .notfound = .{} };
+                }
+
+                const candidate = s.symbols.items[index - 1];
+                if (ip < candidate.addr + candidate.size) {
+                    return .{ .found = candidate };
+                }
+
+                return .{ .found = candidate };
+
+                // NOTE: this would make sense, but apparently we can just return the candidate. I'm not sure if I
+                // understand why this happens. It's a major TODO to figure this out.
+                //
+                // ```
+                // std.log.err(
+                //     "Failed to find ip {} in shared object '{s}', best candidate address at {} with size {}",
+                //     .{ ip, s.path, candidate.addr, candidate.size },
+                // );
+                // return error.SharedObjectMapLookupFailure;
+                // ```
+            },
+            .unmapped => |_| {
+                return .{ .unmapped = .{} };
+            },
         }
-
-        const candidate = self.symbols.items[index - 1];
-        if (ip < candidate.addr + candidate.size) {
-            return candidate;
-        }
-
-        return error.SharedObjectMapLookupFailure;
     }
 
     pub fn deinit(self: *SharedObjectMap) void {
@@ -567,12 +676,22 @@ pub const SharedObjectMap = struct {
         self.allocator.free(self.path);
     }
 
-    fn populate(allocator: std.mem.Allocator, mappedSharedObject: []align(std.heap.page_size_min) const u8, symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) !void {
+    fn readHeader(mappedSharedObject: []align(std.heap.page_size_min) const u8) !std.elf.Header {
         const header = blk: {
             var reader = std.Io.Reader.fixed(mappedSharedObject);
             break :blk try std.elf.Header.read(&reader);
         };
 
+        return header;
+    }
+
+    fn queryObjectType(mappedSharedObject: []align(std.heap.page_size_min) const u8) !std.elf.ET {
+        const header = try readHeader(mappedSharedObject);
+        return header.type;
+    }
+
+    fn populate(allocator: std.mem.Allocator, mappedSharedObject: []align(std.heap.page_size_min) const u8, symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) !void {
+        const header = try readHeader(mappedSharedObject);
         var sectionIterator = header.iterateSectionHeadersBuffer(mappedSharedObject);
         while (try sectionIterator.next()) |section| {
             if (section.sh_type == std.elf.SHT_SYMTAB or section.sh_type == std.elf.SHT_DYNSYM) {
@@ -594,7 +713,7 @@ pub const SharedObjectMap = struct {
                 for (0..symbolCount) |_| {
                     const symbol = try stringTableReader.takeStruct(std.elf.Elf64_Sym, header.endian);
 
-                    if (symbol.st_size == 0) continue;
+                    // if (symbol.st_size == 0) continue;
 
                     const name = std.mem.sliceTo(stringTable[symbol.st_name..], 0);
                     try symbols.append(allocator, .{
@@ -774,8 +893,13 @@ pub const SymbolTrie = struct {
                 .user => |e| blk: {
                     const p = stacks.umap.items[e.umapid];
                     const s = try self.sharedObjectMapCache.find(p.path);
-                    const q = try s.find((e.umapip - p.addressBeg) + p.offset);
-                    break :blk try self.allocator.dupe(u8, q.name);
+                    switch (s.find(e.umapip, p)) {
+                        .found => |w| {
+                            break :blk try self.allocator.dupe(u8, w.name);
+                        },
+                        .notfound => break :blk "notfound",
+                        .unmapped => break :blk "unmapped",
+                    }
                 },
             };
 
@@ -919,12 +1043,16 @@ pub const App = struct {
         // run
         var timer = try std.time.Timer.start();
         while (timer.read() < nanoseconds) {
-            try self.ring.poll(1);
+            try self.ring.consume();
             std.atomic.spinLoopHint();
         }
 
         var symboltrie = try SymbolTrie.init(self.allocator);
         try symboltrie.add(self.iptrie.*);
+
+        for (symboltrie.entries.items) |item| {
+            std.log.info("{}", .{item});
+        }
 
         // report how many we missed, reset it
         std.log.info("missed: {d}", .{self.missed.*});

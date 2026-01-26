@@ -12,18 +12,6 @@ pub fn libbpfGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, opti
     return libbpf_dep;
 }
 
-pub fn libelfGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Dependency {
-    const libelf_dep = b.dependency(
-        "libelf",
-        .{
-            .target = target,
-            .optimize = optimize,
-        },
-    );
-
-    return libelf_dep;
-}
-
 pub fn libvaxisGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Dependency {
      const libvaxis_dep = b.dependency("vaxis", .{
         .target = target,
@@ -93,7 +81,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const libbpf = libbpfGetDependency(b, target, optimize);
-    const libelf = libelfGetDependency(b, target, optimize);
     const libvaxis = libvaxisGetDependency(b, target, optimize);
 
     const profileModule = ebpfModuleFromCSource(b, "profile", "src/bpf/profile.bpf.c");
@@ -117,7 +104,6 @@ pub fn build(b: *std.Build) void {
 
     ebpfAddIncludePaths(b, mod);
     mod.linkLibrary(libbpf.artifact("bpf"));
-    mod.linkLibrary(libelf.artifact("elf"));
     mod.addImport("vaxis", libvaxis.module("vaxis"));
 
     // our program

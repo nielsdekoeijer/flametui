@@ -2,12 +2,18 @@
 
 #define MAX_STACK_DEPTH 128
 
+// We use dynamic stacks!
 struct sample_event {
     __u32 pid;
-    __u32 tgid;
     __u32 kstack_sz; 
     __u32 ustack_sz; 
-    char comm[16];
+};
+
+// This is our old struct, which has fixed stacks
+struct sample_event_old {
+    __u32 pid;
+    __u32 kstack_sz; 
+    __u32 ustack_sz; 
     __u64 kips[MAX_STACK_DEPTH];
     __u64 uips[MAX_STACK_DEPTH];
 };

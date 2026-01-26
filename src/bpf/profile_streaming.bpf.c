@@ -14,6 +14,9 @@ __u64 dropped_events = 0;
 SEC("perf_event")
 int do_sample(struct bpf_perf_event_data *ctx) {
     struct sample_event *e;
+
+    // int max_bytes = MAX_STACK_DEPTH * sizeof(__u64);
+    // size_t event_size = sizeof(struct sample_event) + (MAX_STACK_DEPTH * sizeof(__u64) * 2);
     
     e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -23,8 +26,6 @@ int do_sample(struct bpf_perf_event_data *ctx) {
 
     __u64 id = bpf_get_current_pid_tgid();
     e->pid = id;
-    e->tgid = id >> 32;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     long k_res = bpf_get_stack(ctx, e->kips, sizeof(e->kips), 0);
     if (k_res > 0) {

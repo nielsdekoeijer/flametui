@@ -138,7 +138,7 @@ pub const UserSymbolResolver = struct {
                 const dll_path = line_iter.rest();
                 if (dll_path.len == 0) continue;
                 if (std.fs.path.isAbsolute(dll_path)) {
-                    const dll = try std.fs.openFileAbsolute(dll_path, .{});
+                    const dll = std.fs.openFileAbsolute(dll_path, .{}) catch return "NOTFOUND";
                     defer dll.close();
                     var dll_buf: [512]u8 = undefined;
                     var dll_reader = dll.reader(&dll_buf);

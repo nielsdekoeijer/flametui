@@ -455,7 +455,7 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
         var links = try std.ArrayListUnmanaged(bpf.Object.Link).initCapacity(allocator, cpuCount);
         defer links.clearAndFree(allocator);
         defer {
-            for (links.items) |link| {
+            for (links.items) |*link| {
                 link.free();
             }
         }
@@ -471,7 +471,7 @@ pub fn run_profile(allocator: std.mem.Allocator) anyerror!void {
                 },
             };
 
-            const link = try object.attachProgramPerfEventByName("do_sample", cpu, &attributes);
+            var link = try object.attachProgramPerfEventByName("do_sample", cpu, &attributes);
             errdefer link.free();
             try links.append(allocator, link);
         }

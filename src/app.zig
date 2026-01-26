@@ -8,8 +8,23 @@ const profile_definitions = @cImport({
     @cInclude("profile_streaming.bpf.h");
 });
 
-const EventType = profile_definitions.sample_event;
-const Error = error{OutOfMemory};
+/// The event type from bpf
+const EventTypeRaw = profile_definitions.sample_event;
+
+/// Our parsed view over the raw data, note we dont clone for efficiencies sake
+const EventType = struct {
+    pid: u32,
+    kips: []const u64,
+    uips: []const u64,
+
+    pub fn init(raw: *const EventTypeRaw) EventType {
+        return EventType{
+            .pid = raw.pid,
+            .kips = raw.kips[0 .. raw.kstack_sz / 8],
+            .uips = raw.kips[0 .. raw.ustack_sz / 8],
+        };
+    }
+};
 
 /// Alias for the kernel type
 pub const InstructionPointer = u64;
@@ -444,8 +459,7 @@ pub const StackTrie = struct {
         var parent: Id = RootId;
 
         // Resolve user stack frames
-        const ustackSize = event.ustack_sz / 8;
-        var i = ustackSize;
+        var i = event.uips.len;
         while (i > 0) {
             i -= 1;
             const ip = event.uips[i];
@@ -486,9 +500,7 @@ pub const StackTrie = struct {
         }
 
         // Resolve kernel stack frames
-
-        const kstackSize = event.kstack_sz / 8;
-        var j = kstackSize;
+        var j = event.kips.len;
         while (j > 0) {
             j -= 1;
             const ip = event.kips[j];
@@ -961,13 +973,14 @@ pub const App = struct {
     missed: *u64,
     iptrie: *StackTrie,
 
-    pub fn eventCallback(iptrie: *StackTrie, event: EventType) void {
-        iptrie.add(event) catch unreachable;
+    pub fn eventCallback(iptrie: *StackTrie, event: EventTypeRaw) void {
+        const parsed = EventType.init(&event);
+        iptrie.add(parsed) catch unreachable;
     }
 
     pub fn init(allocator: std.mem.Allocator) anyerror!App {
         // disable logging
-        try bpf.setupLoggerBackend(.none);
+        try bpf.setupLoggerBackend(.zig);
 
         // load our embedded code into an byte array with 8 byte alignment
         const code = try bpf.loadProgramAligned(allocator, profile_program.bytecode);
@@ -990,7 +1003,7 @@ pub const App = struct {
         iptrie.* = try StackTrie.init(allocator);
 
         // create event ring buffer
-        const ring = try object.attachRingBufferMapCallback(StackTrie, EventType, eventCallback, iptrie, "events");
+        const ring = try object.attachRingBufferMapCallback(StackTrie, EventTypeRaw, eventCallback, iptrie, "events");
 
         // grab global counters
         const missed = try object.getGlobals(u64);

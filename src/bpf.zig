@@ -108,14 +108,14 @@ pub const Object = struct {
         pub fn createCallback(
             comptime ContextType: type,
             comptime EventType: type,
-            comptime handler: *const fn (*ContextType, EventType) void,
+            comptime handler: *const fn (*ContextType, *const EventType) void,
         ) type {
             return struct {
                 pub fn handlerWrapper(ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int {
                     _ = size;
                     const event = @as(*const EventType, @ptrCast(@alignCast(data orelse @panic("event is null"))));
                     const context = @as(*ContextType, @ptrCast(@alignCast(ctx orelse @panic("context is null"))));
-                    handler(context, event.*);
+                    handler(context, event);
                     return 0;
                 }
             };
@@ -142,7 +142,7 @@ pub const Object = struct {
         object: Object,
         comptime ContextType: type,
         comptime EventType: type,
-        comptime handler: *const fn (*ContextType, EventType) void,
+        comptime handler: *const fn (*ContextType, *const EventType) void,
         context: *ContextType,
         name: [*c]const u8,
     ) anyerror!RingBufferMap {

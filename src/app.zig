@@ -9,20 +9,26 @@ const profile_definitions = @cImport({
 });
 
 /// The event type from bpf
-const EventTypeRaw = profile_definitions.sample_event;
+const EventTypeRaw = u64; // profile_definitions.sample_event;
 
 /// Our parsed view over the raw data, note we dont clone for efficiencies sake
 const EventType = struct {
-    pid: u32,
+    pid: u64,
     kips: []const u64,
     uips: []const u64,
 
     pub fn init(raw: *const EventTypeRaw) EventType {
-        return EventType{
-            .pid = raw.pid,
-            .kips = raw.kips[0 .. raw.kstack_sz / 8],
-            .uips = raw.kips[0 .. raw.ustack_sz / 8],
+        const ev = @as([*]const u64, @ptrCast(raw));
+        const us = ev[1] / 8;
+        const ks = ev[2] / 8;
+
+        const event = EventType{
+            .pid = ev[0],
+            .uips = ev[3..3 + us],
+            .kips = ev[3 + us .. 3 + us + ks],
         };
+
+        return event;
     }
 };
 
@@ -973,8 +979,8 @@ pub const App = struct {
     missed: *u64,
     iptrie: *StackTrie,
 
-    pub fn eventCallback(iptrie: *StackTrie, event: EventTypeRaw) void {
-        const parsed = EventType.init(&event);
+    pub fn eventCallback(iptrie: *StackTrie, event: *const EventTypeRaw) void {
+        const parsed = EventType.init(event);
         iptrie.add(parsed) catch unreachable;
     }
 

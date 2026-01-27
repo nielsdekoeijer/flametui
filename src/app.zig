@@ -2,7 +2,7 @@
 const std = @import("std");
 const bpf = @import("bpf.zig");
 const c = @import("cimport.zig").c;
-
+const vaxis = @import("vaxis");
 const profile_program = @import("profile_streaming");
 const profile_definitions = @cImport({
     @cInclude("profile_streaming.bpf.h");
@@ -24,7 +24,7 @@ const EventType = struct {
 
         const event = EventType{
             .pid = ev[0],
-            .uips = ev[3..3 + us],
+            .uips = ev[3 .. 3 + us],
             .kips = ev[3 + us .. 3 + us + ks],
         };
 
@@ -395,6 +395,7 @@ pub const UMapCache = struct {
 pub const StackTrie = struct {
     /// The different entry types in our trie
     const TrieEntryKind = enum {
+        root,
         kernel,
         user,
     };
@@ -412,6 +413,7 @@ pub const StackTrie = struct {
 
     /// Trie union, datatype we store in the trie
     pub const TriePayload = union(TrieEntryKind) {
+        root: void,
         kernel: KTrieEntry,
         user: UTrieEntry,
     };
@@ -446,10 +448,17 @@ pub const StackTrie = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !StackTrie {
+        var entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0);
+        try entries.append(allocator, .{
+            .hitCount = 0,
+            .parent = 0,
+            .entry = .root,
+        });
+
         return StackTrie{
             .umap = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 0),
             .umapLookup = try UMapCache.init(allocator),
-            .entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0),
+            .entries = entries,
             .entriesLookup = try std.AutoArrayHashMapUnmanaged(Key, u64).init(
                 allocator,
                 &[_]Key{},
@@ -813,6 +822,7 @@ pub const SharedObjectMapCache = struct {
 pub const SymbolTrie = struct {
     /// The different entry types in our trie
     const TrieEntryKind = enum {
+        root,
         kernel,
         user,
     };
@@ -830,6 +840,7 @@ pub const SymbolTrie = struct {
 
     /// Trie union, datatype we store in the trie
     pub const TriePayload = union(TrieEntryKind) {
+        root: KTrieEntry,
         kernel: KTrieEntry,
         user: UTrieEntry,
     };
@@ -838,6 +849,8 @@ pub const SymbolTrie = struct {
     pub const TrieEntry = struct {
         hitCount: u64,
         parent: Id,
+        // To be able to walk the trie, we store an array to its children
+        children: std.ArrayListUnmanaged(Id),
         entry: TriePayload,
     };
 
@@ -864,8 +877,17 @@ pub const SymbolTrie = struct {
     sharedObjectMapCache: SharedObjectMapCache,
 
     pub fn init(allocator: std.mem.Allocator) !SymbolTrie {
+        const entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 1);
+
+        // try entries.append(allocator, .{
+        //     .hitCount = 0,
+        //     .parent = 0,
+        //     .children = try std.ArrayListUnmanaged(Id).initCapacity(allocator, 0),
+        //     .entry = .root,
+        // });
+
         return SymbolTrie{
-            .entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0),
+            .entries = entries,
             .entriesLookup = try std.AutoArrayHashMapUnmanaged(Key, Id).init(
                 allocator,
                 &[_]Key{},
@@ -886,6 +908,7 @@ pub const SymbolTrie = struct {
         const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.Id, SymbolTrie.Id);
         var shadowMap = try ShadowMap.init(self.allocator, &[_]StackTrie.Id{}, &[_]SymbolTrie.Id{});
         defer shadowMap.deinit(self.allocator);
+        // try shadowMap.put(self.allocator, StackTrie.RootId, RootId);
 
         // we exploit the fact that our tree is laid out from root --> upwards
         for (0..stacks.entries.items.len) |i| {
@@ -894,7 +917,7 @@ pub const SymbolTrie = struct {
             const stackItem = stacks.entries.items[stackId];
 
             // resolve the parent (due to the order, should be garunteed to be known)
-            const symbolParent = blk: {
+            const parentId = blk: {
                 if (stackItem.parent == StackTrie.RootId) {
                     break :blk RootId;
                 } else {
@@ -904,6 +927,7 @@ pub const SymbolTrie = struct {
 
             // find the symbol
             const symbol = switch (stackItem.entry) {
+                .root => "root",
                 .kernel => |e| blk: {
                     const s = try self.kmap.find(e.kmapip);
                     break :blk try self.allocator.dupe(u8, s.symbol);
@@ -922,7 +946,7 @@ pub const SymbolTrie = struct {
             };
 
             // create the key
-            const key = Key{ .parent = symbolParent, .symbolHash = hash(symbol) };
+            const key = Key{ .parent = parentId, .symbolHash = hash(symbol) };
 
             // trie update / insertion
             const found = self.entriesLookup.get(key);
@@ -933,6 +957,11 @@ pub const SymbolTrie = struct {
             } else {
                 // create the payload depending on the trie that came in
                 const payload = blk: switch (stackItem.entry) {
+                    .root => break :blk TriePayload{
+                        .root = .{
+                            .symbol = symbol,
+                        },
+                    },
                     .kernel => break :blk TriePayload{
                         .kernel = .{
                             .symbol = symbol,
@@ -949,13 +978,19 @@ pub const SymbolTrie = struct {
                 // append + add to map
                 try self.entries.append(self.allocator, TrieEntry{
                     .hitCount = 1,
-                    .parent = symbolParent,
+                    .parent = parentId,
                     .entry = payload,
+                    .children = try std.ArrayListUnmanaged(Id).initCapacity(self.allocator, 0),
                 });
 
+                // grab our id
                 const symbolId: Id = @intCast(self.entries.items.len - 1);
+
                 try self.entriesLookup.put(self.allocator, key, symbolId);
                 try shadowMap.put(self.allocator, stackId, symbolId);
+
+                // go to parent, and add self as child
+                try self.entries.items[parentId].children.append(self.allocator, symbolId);
             }
         }
     }
@@ -964,6 +999,248 @@ pub const SymbolTrie = struct {
         self.kmap.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.entriesLookup.deinit(self.allocator);
+    }
+};
+
+/// ===================================================================================================================
+/// TUI
+/// ===================================================================================================================
+/// Helper that leprs between two vaxis colors with interpolation parameter t
+fn lerpColor(a: vaxis.Color, b: vaxis.Color, t: f32) vaxis.Color {
+    return .{
+        .rgb = .{
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[0])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[0])) * t),
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[1])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[1])) * t),
+            @intFromFloat(@as(f32, @floatFromInt(a.rgb[2])) * (1.0 - t) + @as(f32, @floatFromInt(b.rgb[2])) * t),
+        },
+    };
+}
+
+/// Helper that dims a vaxis color with a factor t
+fn dimColor(color: vaxis.Color, t: f32) vaxis.Color {
+    switch (color) {
+        .rgb => |rgb| {
+            return .{
+                .rgb = .{
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * t),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * t),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * t),
+                },
+            };
+        },
+
+        else => return color,
+    }
+}
+
+/// Colors using greg's original version
+pub fn getColorFromName(symbolName: []const u8) vaxis.Color {
+    const hashName = struct {
+        pub fn hashName(name: []const u8, reverse: bool) f32 {
+            var vector: f32 = 0;
+            var weight: f32 = 1;
+            var max: f32 = 1;
+            var mod: f32 = 10;
+
+            for (0..name.len) |i| {
+                const idx = blk: {
+                    if (reverse) {
+                        break :blk i;
+                    } else {
+                        break :blk name.len - 1 - i;
+                    }
+                };
+
+                const chr = name[idx];
+                const val = @as(f32, @floatFromInt(@mod(chr, @as(u8, @intFromFloat(mod)))));
+
+                vector += (val / (mod - 1.0)) * weight;
+                max += weight;
+                weight *= 0.70;
+                mod += 1;
+
+                if (mod > 12) {
+                    break;
+                }
+            }
+
+            return (1.0 - (vector / max));
+        }
+    }.hashName;
+
+    const v1 = hashName(symbolName, true);
+    const v2 = hashName(symbolName, false);
+    const v3 = v2;
+
+    return .{
+        .rgb = .{
+            @as(u8, @intFromFloat(50.0 * v3)) + 205,
+            @as(u8, @intFromFloat(230.0 * v1)),
+            @as(u8, @intFromFloat(55.0 * v2)),
+        },
+    };
+}
+
+/// Object managing plotting and events
+const Interface = struct {
+    backgroundGradientBeg: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xB0 } },
+    backgroundGradientEnd: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xEE } },
+
+    allocator: std.mem.Allocator,
+    tty: vaxis.Tty,
+    vx: vaxis.Vaxis,
+    loop: vaxis.Loop(Event),
+    symbols: ?*SymbolTrie,
+
+    // vaxis events we want to subscribe to
+    const Event = union(enum) {
+        key_press: vaxis.Key,
+        winsize: vaxis.Winsize,
+        mouse: vaxis.Mouse,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) !Interface {
+        // open tty
+        var buffer: [4096]u8 = undefined;
+        var tty = try vaxis.Tty.init(&buffer);
+        errdefer tty.deinit();
+
+        // start vaxis
+        var vx = try vaxis.init(allocator, .{});
+        errdefer vx.deinit(allocator, tty.writer());
+
+        // setup loop
+        var loop = vaxis.Loop(Event){ .tty = &tty, .vaxis = &vx };
+        try loop.init();
+
+        // configure vaxis
+        try vx.setMouseMode(tty.writer(), true);
+        try vx.enterAltScreen(tty.writer());
+        try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+
+        return Interface{
+            .allocator = allocator,
+            .tty = tty,
+            .vx = vx,
+            .loop = loop,
+            .symbols = null,
+        };
+    }
+
+    pub fn populate(self: *Interface, symbols: *SymbolTrie) void {
+        self.symbols = symbols;
+    }
+
+    pub fn start(self: *Interface) !void {
+        var mouse: ?vaxis.Mouse = null;
+        {
+            const win = self.vx.window();
+            try self.draw(win, mouse);
+        }
+
+        try self.loop.start();
+        while (true) {
+            const event = self.loop.nextEvent();
+
+            switch (event) {
+                .key_press => |key| {
+                    if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+                        break;
+                    }
+                },
+                .winsize => |winsize| {
+                    try self.vx.resize(self.allocator, self.tty.writer(), winsize);
+                },
+                .mouse => |m| {
+                    mouse = m;
+                },
+            }
+
+            const win = self.vx.window();
+            try self.draw(win, mouse);
+            try self.vx.render(self.tty.writer());
+        }
+    }
+
+    pub fn clearBackground(self: Interface, win: vaxis.Window) !void {
+        const h = win.height;
+        const w = win.width;
+
+        for (0..h) |y| {
+            const alpha = 1.0 - @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(h - 1));
+            const color = lerpColor(self.backgroundGradientBeg, self.backgroundGradientEnd, alpha);
+            for (0..w) |x| {
+                win.writeCell(@intCast(x), @intCast(y), .{
+                    .char = .{ .grapheme = " " },
+                    .style = .{ .bg = color },
+                });
+            }
+        }
+    }
+
+    // padding on the sides
+    const FlamegraphBorderWBeg = 2;
+    const FlamegraphBorderWEnd = 2;
+    const FlamegraphBorderHBeg = 4;
+    const FlamegraphBorderHEnd = 4;
+
+    pub fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
+        try self.clearBackground(win);
+        _ = mouse;
+
+        if (self.symbols) |symbols| {
+            const w = win.width;
+            const h = win.height;
+
+            const toSmallW = w <= FlamegraphBorderWBeg + FlamegraphBorderWEnd;
+            const toSmallH = h <= FlamegraphBorderHBeg + FlamegraphBorderHEnd;
+
+            if (toSmallW or toSmallH) return;
+
+            const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
+            const flamegraphH = h - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
+
+            // draw recursively
+            try self.drawSymbol(symbols.entries.items[0], win, 1.0, 0.0, flamegraphW, flamegraphH);
+        }
+    }
+
+    pub fn drawSymbol(
+        self: *Interface,
+        entry: SymbolTrie.TrieEntry,
+        win: vaxis.Window,
+        width: f32,
+        offset: f32,
+        currentX: i16,
+        currentY: i16,
+    ) !void {
+        const symbol = switch(entry.entry) {
+            inline else => |s| return s.symbol,
+        };
+
+        const style = vaxis.Style{
+            .fg = self.text_color,
+            .bg = getColorFromName(symbol),
+            .bold = false,
+        };
+
+        win.writeCell(w, h, .{
+            .char = .{ .grapheme = "-" },
+            .style = style,
+        });
+
+        for (entry.children.items) |id| {
+            try self.drawSymbol(self.symbols.?.entries.items[id], win, 1.0, 0.0, w, h);
+        }
+    }
+
+    pub fn stop(self: *Interface) void {
+        self.loop.stop();
+    }
+
+    pub fn deinit(self: *Interface) void {
+        self.vx.deinit(self.allocator, self.tty.writer());
+        self.tty.deinit();
     }
 };
 
@@ -1068,7 +1345,6 @@ pub const App = struct {
 
         var symboltrie = try SymbolTrie.init(self.allocator);
         try symboltrie.add(self.iptrie.*);
-
         for (symboltrie.entries.items) |item| {
             std.log.info("{}", .{item});
         }
@@ -1076,5 +1352,13 @@ pub const App = struct {
         // report how many we missed, reset it
         std.log.info("missed: {d}", .{self.missed.*});
         self.missed.* = 0;
+
+        var interface = try Interface.init(self.allocator);
+        defer interface.deinit();
+
+        interface.populate(&symboltrie);
+
+        try interface.start();
+        defer interface.stop();
     }
 };

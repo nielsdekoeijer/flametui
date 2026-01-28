@@ -452,6 +452,8 @@ pub const StackTrie = struct {
 
     pub fn init(allocator: std.mem.Allocator) !StackTrie {
         var entries = try std.ArrayListUnmanaged(TrieEntry).initCapacity(allocator, 0);
+
+        // initialize the root
         try entries.append(allocator, .{
             .hitCount = 0,
             .parent = 0,
@@ -489,6 +491,7 @@ pub const StackTrie = struct {
             };
 
             const found = self.entriesLookup.get(key);
+
             if (found) |index| {
                 self.entries.items[index].hitCount += 1;
                 parent = @intCast(index);
@@ -938,7 +941,9 @@ pub const SymbolTrie = struct {
         const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.Id, SymbolTrie.Id);
         var shadowMap = try ShadowMap.init(self.allocator, &[_]StackTrie.Id{}, &[_]SymbolTrie.Id{});
         defer shadowMap.deinit(self.allocator);
-        // try shadowMap.put(self.allocator, StackTrie.RootId, RootId);
+
+        // Map the root ids to eachother
+        try shadowMap.put(self.allocator, StackTrie.RootId, RootId);
 
         // we exploit the fact that our tree is laid out from root --> upwards
         for (0..stacks.entries.items.len) |i| {
@@ -947,13 +952,7 @@ pub const SymbolTrie = struct {
             const stackItem = stacks.entries.items[stackId];
 
             // resolve the parent (due to the order, should be garunteed to be known)
-            const parentId = blk: {
-                if (stackItem.parent == StackTrie.RootId) {
-                    break :blk RootId;
-                } else {
-                    break :blk shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
-                }
-            };
+            const parentId = shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
 
             // find the symbol
             const symbol = switch (stackItem.entry) {

@@ -474,6 +474,7 @@ pub const StackTrie = struct {
     }
 
     /// Add an event to the trie
+    /// TODO: this whole logic is cooked
     pub fn add(self: *StackTrie, event: EventType) !void {
         const pid = @as(PID, @intCast(event.pid));
         var parent: Id = RootId;

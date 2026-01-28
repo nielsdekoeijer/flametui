@@ -1085,6 +1085,7 @@ pub fn getColorFromName(symbolName: []const u8) vaxis.Color {
 const Interface = struct {
     backgroundGradientBeg: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xB0 } },
     backgroundGradientEnd: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xEE } },
+    textColor: vaxis.Color = .{ .rgb = .{ 0x00, 0x00, 0x00 } },
 
     allocator: std.mem.Allocator,
     tty: vaxis.Tty,
@@ -1162,6 +1163,13 @@ const Interface = struct {
         }
     }
 
+    // padding on the sides
+    const FlamegraphBorderWBeg = 2;
+    const FlamegraphBorderWEnd = 2;
+    const FlamegraphBorderHBeg = 4;
+    const FlamegraphBorderHEnd = 4;
+
+
     pub fn clearBackground(self: Interface, win: vaxis.Window) !void {
         const h = win.height;
         const w = win.width;
@@ -1178,12 +1186,6 @@ const Interface = struct {
         }
     }
 
-    // padding on the sides
-    const FlamegraphBorderWBeg = 2;
-    const FlamegraphBorderWEnd = 2;
-    const FlamegraphBorderHBeg = 4;
-    const FlamegraphBorderHEnd = 4;
-
     pub fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
         try self.clearBackground(win);
         _ = mouse;
@@ -1197,11 +1199,17 @@ const Interface = struct {
 
             if (toSmallW or toSmallH) return;
 
-            const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
+            // const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
             const flamegraphH = h - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
 
-            // draw recursively
-            try self.drawSymbol(symbols.entries.items[0], win, 1.0, 0.0, flamegraphW, flamegraphH);
+            // draw recursively, first node is the root node
+            std.debug.assert(symbols.entries.items[0].entry == .root);
+            try self.drawSymbol(symbols.entries.items[0], win, .{
+                .width = 1.0,
+                .offset = 0.0,
+                .currentX = 0,
+                .currentY = flamegraphH,
+            });
         }
     }
 
@@ -1209,29 +1217,41 @@ const Interface = struct {
         self: *Interface,
         entry: SymbolTrie.TrieEntry,
         win: vaxis.Window,
-        width: f32,
-        offset: f32,
-        currentX: i16,
-        currentY: i16,
+        context: struct {
+            width: f32,
+            offset: f32,
+            currentX: u16,
+            currentY: u16,
+        },
     ) !void {
-        const symbol = switch(entry.entry) {
-            inline else => |s| return s.symbol,
+        // how we get the symbol name
+        const symbol = blk: switch (entry.entry) {
+            inline else => |s| break :blk s.symbol,
         };
 
+        // how we draw the bar
         const style = vaxis.Style{
-            .fg = self.text_color,
+            .fg = self.textColor,
             .bg = getColorFromName(symbol),
             .bold = false,
         };
 
-        win.writeCell(w, h, .{
-            .char = .{ .grapheme = "-" },
-            .style = style,
-        });
-
-        for (entry.children.items) |id| {
-            try self.drawSymbol(self.symbols.?.entries.items[id], win, 1.0, 0.0, w, h);
+        switch (entry.entry) {
+            .root => {
+                std.log.info("asdfasdf", .{});
+                for (FlamegraphBorderWBeg..FlamegraphBorderWEnd) |i| {
+                    win.writeCell(i, context.currentY, .{
+                        .char = .{ .grapheme = "=" },
+                        .style = style,
+                    });
+                }
+            },
+            else => {},
         }
+
+        // for (entry.children.items) |id| {
+        //     try self.drawSymbol(self.symbols.?.entries.items[id], win, 1.0, 0.0, w, h);
+        // }
     }
 
     pub fn stop(self: *Interface) void {

@@ -8,6 +8,9 @@ const profile_definitions = @cImport({
     @cInclude("profile_streaming.bpf.h");
 });
 
+/// ===================================================================================================================
+/// Helpers
+/// ===================================================================================================================
 /// The event type from bpf
 const EventTypeRaw = u64; // profile_definitions.sample_event;
 
@@ -559,11 +562,14 @@ pub const StackTrie = struct {
 /// ===================================================================================================================
 pub const SharedObjectSymbol = struct {
     addr: u64,
-    size: u32,
+    size: u64,
     name: []const u8,
 };
 
+/// Class that describes a shared object, containing a collection of symbols
 pub const SharedObjectMap = struct {
+    // We have a funny pattern here: we still want to be able to query a shared object map if its not mapped
+    // If this is great design is to be determined.
     const Internal = union((enum { loaded, unmapped })) {
         loaded: struct {
             mappedSharedObject: []align(std.heap.page_size_min) const u8,
@@ -712,6 +718,14 @@ pub const SharedObjectMap = struct {
         return header;
     }
 
+    fn readHeaderArchitecture(header: std.elf.Header) enum { @"64", @"32" } {
+        if (header.is_64) {
+            return .@"64";
+        } else {
+            return .@"32";
+        }
+    }
+
     fn queryObjectType(mappedSharedObject: []align(std.heap.page_size_min) const u8) !std.elf.ET {
         const header = try readHeader(mappedSharedObject);
         return header.type;
@@ -719,37 +733,52 @@ pub const SharedObjectMap = struct {
 
     fn populate(allocator: std.mem.Allocator, mappedSharedObject: []align(std.heap.page_size_min) const u8, symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) !void {
         const header = try readHeader(mappedSharedObject);
-        var sectionIterator = header.iterateSectionHeadersBuffer(mappedSharedObject);
-        while (try sectionIterator.next()) |section| {
-            if (section.sh_type == std.elf.SHT_SYMTAB or section.sh_type == std.elf.SHT_DYNSYM) {
-                // Get symbol count
-                const symbolCount = section.sh_size / section.sh_entsize;
+        switch (readHeaderArchitecture(header)) {
+            inline else => |val| {
+                const Shdr = switch (comptime val) {
+                    .@"32" => std.elf.Elf32_Shdr,
+                    .@"64" => std.elf.Elf64_Shdr,
+                };
 
-                // NOTE: shoff is the start of the table
-                // NOTE: sh_link points to "The section header index of the associated string table"
-                // NOTE: shentsize is the size of each section
-                const stringTableHeaderOffset = header.shoff + (section.sh_link * header.shentsize);
+                const Sym = switch (comptime val) {
+                    .@"32" => std.elf.Elf32_Sym,
+                    .@"64" => std.elf.Elf64_Sym,
+                };
 
-                // Read the string table header
-                var stringTableHeaderReader = std.Io.Reader.fixed(mappedSharedObject[stringTableHeaderOffset..]);
-                const stringTableHeader = try stringTableHeaderReader.takeStruct(std.elf.Elf64_Shdr, header.endian);
+                var sectionIterator = header.iterateSectionHeadersBuffer(mappedSharedObject);
+                while (try sectionIterator.next()) |section| {
+                    if (section.sh_type == std.elf.SHT_SYMTAB or section.sh_type == std.elf.SHT_DYNSYM) {
+                        // Get symbol count
+                        const symbolCount = section.sh_size / section.sh_entsize;
 
-                // Read symbols
-                const stringTable = mappedSharedObject[stringTableHeader.sh_offset .. stringTableHeader.sh_offset + stringTableHeader.sh_size];
-                var stringTableReader = std.Io.Reader.fixed(mappedSharedObject[section.sh_offset..]);
-                for (0..symbolCount) |_| {
-                    const symbol = try stringTableReader.takeStruct(std.elf.Elf64_Sym, header.endian);
+                        // NOTE: shoff is the start of the table
+                        // NOTE: sh_link points to "The section header index of the associated string table"
+                        // NOTE: shentsize is the size of each section
+                        const stringTableHeaderOffset = header.shoff + (section.sh_link * header.shentsize);
 
-                    // if (symbol.st_size == 0) continue;
+                        // Read the string table header
+                        var stringTableHeaderReader = std.Io.Reader.fixed(mappedSharedObject[stringTableHeaderOffset..]);
+                        const stringTableHeader = try stringTableHeaderReader.takeStruct(Shdr, header.endian);
 
-                    const name = std.mem.sliceTo(stringTable[symbol.st_name..], 0);
-                    try symbols.append(allocator, .{
-                        .addr = symbol.st_value,
-                        .size = @intCast(symbol.st_size),
-                        .name = name,
-                    });
+                        // Read symbols
+                        const stringTable = mappedSharedObject[stringTableHeader.sh_offset .. stringTableHeader.sh_offset + stringTableHeader.sh_size];
+                        var stringTableReader = std.Io.Reader.fixed(mappedSharedObject[section.sh_offset..]);
+                        for (0..symbolCount) |_| {
+                            const symbol = try stringTableReader.takeStruct(Sym, header.endian);
+
+                            // This is odd: it breaks without this, although I think it makes sense.
+                            // TODO: Read elf header documentation to try to understand what I'm actually doing
+                            // if (symbol.st_size == 0) continue;
+                            const name = std.mem.sliceTo(stringTable[symbol.st_name..], 0);
+                            try symbols.append(allocator, .{
+                                .addr = symbol.st_value,
+                                .size = @intCast(symbol.st_size),
+                                .name = name,
+                            });
+                        }
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -764,7 +793,8 @@ pub const SharedObjectMap = struct {
     }
 };
 
-/// SharedObjectMaps are expensive to load and also can be invalidated, thus we have a cache
+/// SharedObjectMaps are expensive to load and parse, and also can be invalidated, thus we have a cache to track this
+/// for us.
 pub const SharedObjectMapCache = struct {
     backend: std.AutoArrayHashMapUnmanaged(u64, SharedObjectMap),
     allocator: std.mem.Allocator,
@@ -1190,30 +1220,44 @@ const Interface = struct {
     }
 
     pub fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
+        // Clear the background
         try self.clearBackground(win);
+
+        // Mouse support is tbd
         _ = mouse;
 
+        // We may not have any symbols loaded, in which case return
         if (self.symbols) |symbols| {
-            const w = win.width;
-            const h = win.height;
-
-            const toSmallW = w <= FlamegraphBorderWBeg + FlamegraphBorderWEnd;
-            const toSmallH = h <= FlamegraphBorderHBeg + FlamegraphBorderHEnd;
+            const toSmallW = win.width <= FlamegraphBorderWBeg + FlamegraphBorderWEnd;
+            const toSmallH = win.height <= FlamegraphBorderHBeg + FlamegraphBorderHEnd;
 
             if (toSmallW or toSmallH) return;
 
-            const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
-            const flamegraphH = h - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
+            // Internal size exclusive of the border
+            const flamegraphW = win.width - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
+            const flamegraphH = win.height - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
+            _ = flamegraphH;
 
-            // draw recursively, first node is the root node
+            // Draw recursively, first node is the root node
             std.debug.assert(symbols.entries.items[0].entry == .root);
             try self.drawSymbol(symbols.entries.items[0], win, .{
+                // We want to draw 100% of the availible space
                 .widthNormalized = 1.0,
+
+                // We start at the beginning
                 .offsetNormalized = 0.0,
-                .widthRow = flamegraphW,
-                .currentX = FlamegraphBorderWBeg,
-                .currentY = flamegraphH,
+
+                // We have space consisting
+                .widthCells = flamegraphW,
+
+                // Where to start drawing X coord
+                .currentX = FlamegraphBorderWBeg + 1,
+
+                // Where to start drawing Y coord
+                .currentY = win.height - FlamegraphBorderHEnd,
             });
+        } else {
+            return;
         }
     }
 
@@ -1224,39 +1268,36 @@ const Interface = struct {
         context: struct {
             offsetNormalized: f32,
             widthNormalized: f32,
-            widthRow: u16,
+            widthCells: u16,
             currentX: u16,
             currentY: u16,
         },
     ) !void {
-        // how we get the symbol name
+        // How we get the symbol name, works for all enums
         const symbol = blk: switch (entry.entry) {
             inline else => |s| break :blk s.symbol,
         };
 
-        // how we draw the bar
+        // How we draw the bar
         const style = vaxis.Style{
             .fg = self.textColor,
             .bg = getColorFromName(symbol),
             .bold = false,
         };
 
-        const rawBegX = context.offsetNormalized * @as(f32, @floatFromInt(context.widthRow));
-        const clampedBegX = @min(@as(f32, @floatFromInt(context.widthRow)), @max(0.0, @round(rawBegX)));
-        const begX: u16 = @intFromFloat(clampedBegX);
-        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthRow));
-        const clampedEndX = @min(@as(f32, @floatFromInt(context.widthRow)), @max(0.0, @round(rawEndX)));
-        const endX: u16 = @intFromFloat(clampedEndX);
-        const absoluteBegX = begX + context.currentX;
-        const absoluteEndX = endX + context.currentX;
-        const len = absoluteEndX - absoluteBegX;
+        // The Y coordinate is fixed and given by the arguments. We have to calculate the X coordinate though.
+        const rawBegX = (context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + @as(f32, @floatFromInt(context.currentX));
+        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + @as(f32, @floatFromInt(context.currentX));
+        const begX: u16 = @intFromFloat(rawBegX);
+        const endX: u16 = @intFromFloat(rawEndX);
+        const len = endX - begX;
 
         switch (entry.entry) {
             else => {
                 const space: []const u8 = &[_]u8{' '};
                 for (0..len) |i| {
                     const glyph = if (i < symbol.len) @as([]const u8, @ptrCast(&symbol[i])) else space;
-                    win.writeCell(absoluteBegX + @as(u16, @intCast(i)), context.currentY, .{
+                    win.writeCell(begX + @as(u16, @intCast(i)), context.currentY, .{
                         .char = .{ .grapheme = glyph },
                         .style = style,
                     });
@@ -1274,9 +1315,10 @@ const Interface = struct {
             const child = self.symbols.?.entries.items[id];
 
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
+            std.debug.assert(childWidth <= 1.0);
 
             try self.drawSymbol(child, win, .{
-                .widthRow = context.widthRow,
+                .widthCells = context.widthCells,
                 .currentX = context.currentX,
                 .currentY = context.currentY - 1,
                 .widthNormalized = childWidth,

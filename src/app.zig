@@ -990,7 +990,9 @@ pub const SymbolTrie = struct {
                 try shadowMap.put(self.allocator, stackId, symbolId);
 
                 // go to parent, and add self as child
-                try self.entries.items[parentId].children.append(self.allocator, symbolId);
+                if (symbolId != parentId) {
+                    try self.entries.items[parentId].children.append(self.allocator, symbolId);
+                }
             }
         }
     }
@@ -1089,6 +1091,7 @@ const Interface = struct {
 
     allocator: std.mem.Allocator,
     tty: vaxis.Tty,
+    ttyBuffer: []u8,
     vx: vaxis.Vaxis,
     loop: vaxis.Loop(Event),
     symbols: ?*SymbolTrie,
@@ -1102,8 +1105,8 @@ const Interface = struct {
 
     pub fn init(allocator: std.mem.Allocator) !Interface {
         // open tty
-        var buffer: [4096]u8 = undefined;
-        var tty = try vaxis.Tty.init(&buffer);
+        const buffer: []u8 = try allocator.alloc(u8, 4096);
+        var tty = try vaxis.Tty.init(buffer);
         errdefer tty.deinit();
 
         // start vaxis
@@ -1122,6 +1125,7 @@ const Interface = struct {
         return Interface{
             .allocator = allocator,
             .tty = tty,
+            .ttyBuffer = buffer,
             .vx = vx,
             .loop = loop,
             .symbols = null,
@@ -1169,7 +1173,6 @@ const Interface = struct {
     const FlamegraphBorderHBeg = 4;
     const FlamegraphBorderHEnd = 4;
 
-
     pub fn clearBackground(self: Interface, win: vaxis.Window) !void {
         const h = win.height;
         const w = win.width;
@@ -1199,15 +1202,16 @@ const Interface = struct {
 
             if (toSmallW or toSmallH) return;
 
-            // const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
+            const flamegraphW = w - FlamegraphBorderWBeg - FlamegraphBorderWEnd;
             const flamegraphH = h - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
 
             // draw recursively, first node is the root node
             std.debug.assert(symbols.entries.items[0].entry == .root);
             try self.drawSymbol(symbols.entries.items[0], win, .{
-                .width = 1.0,
-                .offset = 0.0,
-                .currentX = 0,
+                .widthNormalized = 1.0,
+                .offsetNormalized = 0.0,
+                .widthRow = flamegraphW,
+                .currentX = FlamegraphBorderWBeg,
                 .currentY = flamegraphH,
             });
         }
@@ -1218,8 +1222,9 @@ const Interface = struct {
         entry: SymbolTrie.TrieEntry,
         win: vaxis.Window,
         context: struct {
-            width: f32,
-            offset: f32,
+            offsetNormalized: f32,
+            widthNormalized: f32,
+            widthRow: u16,
             currentX: u16,
             currentY: u16,
         },
@@ -1236,22 +1241,50 @@ const Interface = struct {
             .bold = false,
         };
 
+        const rawBegX = context.offsetNormalized * @as(f32, @floatFromInt(context.widthRow));
+        const clampedBegX = @min(@as(f32, @floatFromInt(context.widthRow)), @max(0.0, @round(rawBegX)));
+        const begX: u16 = @intFromFloat(clampedBegX);
+        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthRow));
+        const clampedEndX = @min(@as(f32, @floatFromInt(context.widthRow)), @max(0.0, @round(rawEndX)));
+        const endX: u16 = @intFromFloat(clampedEndX);
+        const absoluteBegX = begX + context.currentX;
+        const absoluteEndX = endX + context.currentX;
+        const len = absoluteEndX - absoluteBegX;
+
         switch (entry.entry) {
-            .root => {
-                std.log.info("asdfasdf", .{});
-                for (FlamegraphBorderWBeg..FlamegraphBorderWEnd) |i| {
-                    win.writeCell(i, context.currentY, .{
-                        .char = .{ .grapheme = "=" },
+            else => {
+                const space: []const u8 = &[_]u8{' '};
+                for (0..len) |i| {
+                    const glyph = if (i < symbol.len) @as([]const u8, @ptrCast(&symbol[i])) else space;
+                    win.writeCell(absoluteBegX + @as(u16, @intCast(i)), context.currentY, .{
+                        .char = .{ .grapheme = glyph },
                         .style = style,
                     });
                 }
             },
-            else => {},
         }
 
-        // for (entry.children.items) |id| {
-        //     try self.drawSymbol(self.symbols.?.entries.items[id], win, 1.0, 0.0, w, h);
-        // }
+        if (context.currentY == 0) {
+            return;
+        }
+
+        var childOffset: f32 = context.offsetNormalized;
+        for (entry.children.items) |id| {
+            // safe to do
+            const child = self.symbols.?.entries.items[id];
+
+            const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
+
+            try self.drawSymbol(child, win, .{
+                .widthRow = context.widthRow,
+                .currentX = context.currentX,
+                .currentY = context.currentY - 1,
+                .widthNormalized = childWidth,
+                .offsetNormalized = childOffset,
+            });
+
+            childOffset += childWidth;
+        }
     }
 
     pub fn stop(self: *Interface) void {

@@ -4,8 +4,8 @@ const c = @import("cimport.zig").c;
 pub fn setupLoggerBackend(mode: enum { zig, none }) !void {
     _ = switch (mode) {
         .none => c.libbpf_set_print(null),
-        // .zig => @panic("Not supported currently"),
-        .zig => c.libbpf_set_print(log),
+        // .zig => c.libbpf_set_print(log),
+        .zig => c.libbpf_set_print(null),
     };
 }
 
@@ -165,32 +165,32 @@ pub const Object = struct {
     }
 };
 
-// TODO: cant cross compile
-fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: [*c]c.struct___va_list_tag_1) callconv(.c) c_int {
-    var buf: [512]u8 = undefined;
-    const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);
-    if (len_c == 0) {
-        return 0;
-    }
-
-    const len = @max(0, @min(@as(usize, @intCast(len_c)), buf.len) - 2);
-    if (len > 0) {
-        const slice = buf[0..len];
-        switch (level) {
-            c.LIBBPF_WARN => {
-                std.log.warn("{s}", .{slice});
-            },
-            c.LIBBPF_INFO => {
-                std.log.info("{s}", .{slice});
-            },
-            c.LIBBPF_DEBUG => {
-                std.log.debug("{s}", .{slice});
-            },
-            else => {
-                unreachable;
-            },
-        }
-    }
-
-    return len_c;
-}
+// TODO: cant cross compile, but left here for debugging if we need it
+// fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: [*c]c.struct___va_list_tag_1) callconv(.c) c_int {
+//     var buf: [512]u8 = undefined;
+//     const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);
+//     if (len_c == 0) {
+//         return 0;
+//     }
+//
+//     const len = @max(0, @min(@as(usize, @intCast(len_c)), buf.len) - 2);
+//     if (len > 0) {
+//         const slice = buf[0..len];
+//         switch (level) {
+//             c.LIBBPF_WARN => {
+//                 std.log.warn("{s}", .{slice});
+//             },
+//             c.LIBBPF_INFO => {
+//                 std.log.info("{s}", .{slice});
+//             },
+//             c.LIBBPF_DEBUG => {
+//                 std.log.debug("{s}", .{slice});
+//             },
+//             else => {
+//                 unreachable;
+//             },
+//         }
+//     }
+//
+//     return len_c;
+// }

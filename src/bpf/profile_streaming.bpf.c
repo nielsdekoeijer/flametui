@@ -31,6 +31,13 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   struct bpf_dynptr ptr;
   __u32 key;
 
+  // get pid
+  __u64 pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+  if (pid == 0) {
+      // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
+      return 0;
+  }
+
   // get scratch space
   key = 0;
   __u64 *kscratch = bpf_map_lookup_elem(&scratch_kstack, &key);
@@ -45,9 +52,6 @@ int do_sample(struct bpf_perf_event_data *ctx) {
     __sync_fetch_and_add(&dropped_events, 1);
     return 0;
   }
-
-  // get pid
-  __u64 pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
 
   // populate kernel scratch
   long kres = bpf_get_stack(ctx, kscratch, MAX_STACK_DEPTH * sizeof(__u64), 0);

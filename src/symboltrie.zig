@@ -6,6 +6,48 @@ const StackTrie = @import("stacktrie.zig").StackTrie;
 
 const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 
+extern "c" fn __cxa_demangle(
+    mangled_name: [*c]const u8,
+    output_buffer: [*c]u8,
+    length: [*c]usize,       // <-- CHANGE THIS to [*c]usize
+    status: *c_int,
+) [*c]u8;
+
+/// Helper for C++ demanling
+fn tryDemangle(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const u8 {
+    // 1. C++ symbols start with _Z. If not, return original.
+    if (!std.mem.startsWith(u8, mangled_name, "_Z")) {
+        return try allocator.dupe(u8, mangled_name);
+    }
+
+    // 2. Prepare C-string (null-terminated)
+    const c_name = try allocator.dupeZ(u8, mangled_name);
+    defer allocator.free(c_name);
+
+    // 3. Call __cxa_demangle
+    // status: 0 = success, -1 = memory, -2 = invalid name, -3 = invalid arg
+    var status: c_int = undefined;
+
+    // cimport.zig must include <cxxabi.h> and <stdlib.h>
+    const c = @import("cimport.zig").c;
+
+    const demangled_ptr = __cxa_demangle(c_name, null, null, &status);
+
+    if (status == 0 and demangled_ptr != null) {
+        // 4. Convert to Zig slice and copy to our allocator
+        // We use span to calculate length of the C string
+        const len = std.mem.len(demangled_ptr);
+        const result = try allocator.dupe(u8, demangled_ptr[0..len]);
+
+        // 5. IMPORTANT: Free the memory allocated by __cxa_demangle
+        c.free(demangled_ptr);
+        return result;
+    }
+
+    // Fallback: return original if demangling failed
+    return try allocator.dupe(u8, mangled_name);
+}
+
 /// ===================================================================================================================
 /// SymbolTrie
 /// ===================================================================================================================
@@ -165,7 +207,7 @@ pub const SymbolTrie = struct {
                         .user => |e| break :blk TriePayload{
                             .user = .{
                                 // take the symbol, takes ownership!
-                                .symbol = symbol,
+                                .symbol = try tryDemangle(self.allocator, symbol),
                                 // clone the dll for debug later
                                 .dll = try self.allocator.dupe(u8, stacks.umaps.items[e.umapid].path),
                             },

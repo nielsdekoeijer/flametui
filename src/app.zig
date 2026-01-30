@@ -32,7 +32,7 @@ pub const App = struct {
     // Invoked on polling our ebpf stack ringbuffer
     pub fn stackRingCallback(iptrie: *StackTrie, event: *const EventTypeRaw) void {
         const parsed = EventType.init(event);
-        iptrie.add(parsed) catch unreachable;
+        iptrie.add(parsed) catch @panic("failure to add to iptrie in callback");
     }
 
     pub fn init(allocator: std.mem.Allocator) anyerror!App {

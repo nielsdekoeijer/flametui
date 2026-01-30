@@ -164,8 +164,8 @@ pub const StackTrie = struct {
                     // If the entry exists in the map, great, clone it
                     .found => |it| try it.clone(self.allocator),
                     // Else return a fixed map
-                    .notfound => UMapUnmanaged.UMapEntryUnmapped,
-                    .unmapped => UMapUnmanaged.UMapEntryUnmapped,
+                    .notfound => try UMapUnmanaged.UMapEntryUnmapped.clone(self.allocator),
+                    .unmapped => try UMapUnmanaged.UMapEntryUnmapped.clone(self.allocator),
                 };
 
                 // Append it to self

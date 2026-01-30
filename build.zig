@@ -13,7 +13,7 @@ pub fn libbpfGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, opti
 }
 
 pub fn libvaxisGetDependency(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Dependency {
-     const libvaxis_dep = b.dependency("vaxis", .{
+    const libvaxis_dep = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
     });
@@ -33,7 +33,7 @@ pub fn ebpfAddIncludePaths(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(b.path("src/bpf"));
 }
 
-pub fn ebpfModuleFromCSource(b: *std.Build, name: []const u8, path: []const u8) *std.Build.Module {
+pub fn ebpfModuleFromCSource(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, path: []const u8) *std.Build.Module {
     const prog = b.addObject(.{
         .name = name,
         .root_module = b.createModule(.{
@@ -52,15 +52,25 @@ pub fn ebpfModuleFromCSource(b: *std.Build, name: []const u8, path: []const u8) 
 
     prog.root_module.addIncludePath(.{
         .dependency = .{
-            .dependency = vmlinuxGetSourceDependency(b),
-            .sub_path = "include/x86",
+            .dependency = libbpfGetSourceDependency(b),
+            .sub_path = "src",
         },
     });
 
+    const arch_folder = switch (target.result.cpu.arch) {
+        .x86_64 => "x86",
+        .aarch64 => "arm64",
+        .riscv64 => "riscv",
+        .s390x => "s390x",
+        .powerpc64le => "powerpc",
+        .loongarch64 => "loongarch",
+        else => @panic("This architecture is not supported by the vmlinux headers"),
+    };
+
     prog.root_module.addIncludePath(.{
         .dependency = .{
-            .dependency = libbpfGetSourceDependency(b),
-            .sub_path = "src",
+            .dependency = vmlinuxGetSourceDependency(b),
+            .sub_path = b.fmt("include/{s}", .{arch_folder}),
         },
     });
 
@@ -83,23 +93,16 @@ pub fn build(b: *std.Build) void {
     const libbpf = libbpfGetDependency(b, target, optimize);
     const libvaxis = libvaxisGetDependency(b, target, optimize);
 
-    const profileModule = ebpfModuleFromCSource(b, "profile", "src/bpf/profile.bpf.c");
-    const profileStreamingModule = ebpfModuleFromCSource(b, "profile_streaming", "src/bpf/profile_streaming.bpf.c");
+    const profileStreamingModule = ebpfModuleFromCSource(b, target, "profile_streaming", "src/bpf/profile_streaming.bpf.c");
 
     const mod = b.addModule("flametui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "profile", .module = profileModule },
             .{ .name = "profile_streaming", .module = profileStreamingModule },
         },
-    });
-    mod.addIncludePath(.{
-        .dependency = .{
-            .dependency = vmlinuxGetSourceDependency(b),
-            .sub_path = "include/x86",
-        },
+        .link_libcpp = true, 
     });
 
     ebpfAddIncludePaths(b, mod);

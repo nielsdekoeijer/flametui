@@ -129,7 +129,7 @@ pub const Object = struct {
 
         pub fn consume(self: RingBufferMap) !void {
             if (c.ring_buffer__consume(self.rb) < 0) {
-                return error.ConsumeFailure; 
+                return error.ConsumeFailure;
             }
         }
 
@@ -165,9 +165,12 @@ pub const Object = struct {
     }
 };
 
-// TODO: cant cross compile, but left here for debugging if we need it
-// fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: [*c]c.struct___va_list_tag_1) callconv(.c) c_int {
-fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: c.struct___va_list_1) callconv(.c) c_int {
+const VAListType = blk: switch (@import("builtin").cpu.arch) {
+    .aarch64 => break :blk c.struct___va_list_1,
+    else => break :blk [*c]c.struct___va_list_tag_1,
+};
+
+fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: VAListType) callconv(.c) c_int {
     var buf: [512]u8 = undefined;
     const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);
     if (len_c == 0) {

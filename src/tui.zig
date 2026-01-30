@@ -96,13 +96,16 @@ pub const Interface = struct {
             .root => self.rootColor, // Use the user's Native Yellow for root
         };
 
-        return vaxis.Color{
-            .rgb = .{
-                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v3)) + @as(i16, @intCast(baseColor.rgb[0])))))),
-                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v1)) + @as(i16, @intCast(baseColor.rgb[1])))))),
-                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v2)) + @as(i16, @intCast(baseColor.rgb[2])))))),
+        switch (baseColor) {
+            .rgb => return vaxis.Color{
+                .rgb = .{
+                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v3)) + @as(i16, @intCast(baseColor.rgb[0])))))),
+                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v1)) + @as(i16, @intCast(baseColor.rgb[1])))))),
+                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v2)) + @as(i16, @intCast(baseColor.rgb[2])))))),
+                },
             },
-        };
+            else => return baseColor,
+        }
 
         // return .{
         //     .rgb = .{
@@ -149,7 +152,6 @@ pub const Interface = struct {
         // Setup event loop
         var loop = vaxis.Loop(Event){ .tty = &tty, .vaxis = &vx };
         try loop.init();
-        defer tty.deinit();
 
         // Configure vaxis
         try vx.setMouseMode(tty.writer(), true);
@@ -169,6 +171,7 @@ pub const Interface = struct {
 
         tui_loop: while (true) {
             var event = loop.nextEvent();
+
             event_loop: while (true) {
                 // Handle events
                 switch (event) {
@@ -218,6 +221,7 @@ pub const Interface = struct {
                 }
             }
 
+            // var timer = try std.time.Timer.start();
             {
                 self.infoSlice0 = null;
                 self.infoSlice1 = null;
@@ -228,6 +232,8 @@ pub const Interface = struct {
                 try self.draw(win, mouse);
                 try vx.render(tty.writer());
             }
+            // const elapsed_ns = timer.read();
+            // std.debug.print("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
     }
 
@@ -283,7 +289,6 @@ pub const Interface = struct {
             self.drawCellOverBackground(window, @intCast(x), y1, "═", style);
             self.drawCellOverBackground(window, @intCast(x), y2, "═", style);
         }
-
 
         for (0..title.len) |i| {
             self.drawCellOverBackground(window, x1 + 2 + @as(u16, @intCast(i)), y1, (&title[i])[0..1], style);
@@ -360,7 +365,7 @@ pub const Interface = struct {
             "NodeInfo",
             win,
             InfoBorderWBeg - 1,
-            win.height - FlamegraphBorderHEnd - InfoBorderHEnd + 3, 
+            win.height - FlamegraphBorderHEnd - InfoBorderHEnd + 3,
             win.width - FlamegraphBorderWEnd + 1,
             win.height - InfoBorderHBeg + 1,
             self.textColor,

@@ -45,7 +45,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
     __sync_fetch_and_add(&dropped_events, 1);
     return 0;
   }
-  
+
   key = 0;
   __u64 *uscratch = bpf_map_lookup_elem(&scratch_ustack, &key);
   if (!uscratch) {
@@ -58,27 +58,33 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   __u64 kstack_size = 0;
   if (kres > 0) {
     kstack_size = kres;
+    if (kstack_size >= MAX_STACK_DEPTH * sizeof(__u64)) {
+        kstack_size = MAX_STACK_DEPTH * sizeof(__u64) - 1;
+    }
   }
-  
+
   // // populate user scratch
   long ures = bpf_get_stack(ctx, uscratch, MAX_STACK_DEPTH * sizeof(__u64), BPF_F_USER_STACK);
   __u64 ustack_size = 0;
   if (ures > 0) {
     ustack_size = ures;
+    if (ustack_size >= MAX_STACK_DEPTH * sizeof(__u64)) {
+        ustack_size = MAX_STACK_DEPTH * sizeof(__u64) - 1;
+    }
   }
 
   long err;
-  err = bpf_ringbuf_reserve_dynptr(&events, sizeof(__u64) * 3 + ustack_size + kstack_size , 0, &ptr);
+  __u64 ringbufferSize = sizeof(__u64) * 3 + ustack_size + kstack_size;
+  err = bpf_ringbuf_reserve_dynptr(&events,  ringbufferSize, 0, &ptr);
   if (err < 0) {
       __sync_fetch_and_add(&dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
 
-  __u64 offset;
+  __u64 offset = 0;
 
   // add our pid
-  offset = 0;
   err = bpf_dynptr_write(&ptr, offset, &pid, sizeof(pid), 0);
   offset = offset + sizeof(pid);
   if (err < 0) {
@@ -87,6 +93,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
       return 0;
   }
 
+  
   // share the size of our ustack
   err = bpf_dynptr_write(&ptr, offset, &ustack_size, sizeof(ustack_size), 0);
   offset = offset + sizeof(ustack_size);
@@ -96,6 +103,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
       return 0;
   }
 
+
   // share the size of our kstack
   err = bpf_dynptr_write(&ptr, offset, &kstack_size, sizeof(kstack_size), 0);
   offset = offset + sizeof(kstack_size);
@@ -103,6 +111,11 @@ int do_sample(struct bpf_perf_event_data *ctx) {
       __sync_fetch_and_add(&dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
+  }
+
+  // show the verifier
+  if (ustack_size > MAX_STACK_DEPTH * sizeof(__u64)) {
+      ustack_size = MAX_STACK_DEPTH * sizeof(__u64);
   }
 
   // bang on the ustack
@@ -114,7 +127,12 @@ int do_sample(struct bpf_perf_event_data *ctx) {
       return 0;
   }
 
-  // bang on the kstack
+  // show the verifier
+  if (kstack_size > MAX_STACK_DEPTH * sizeof(__u64)) {
+      kstack_size = MAX_STACK_DEPTH * sizeof(__u64);
+  }
+  
+  // // bang on the kstack
   err = bpf_dynptr_write(&ptr, offset, kscratch, kstack_size, 0);
   offset = offset + kstack_size;
   if (err < 0) {

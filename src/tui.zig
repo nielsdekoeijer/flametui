@@ -173,7 +173,6 @@ pub const Interface = struct {
                 // Handle events
                 switch (event) {
                     .color_report => |c| {
-                        std.log.info("{}", .{c});
                         switch (c.kind) {
                             .index => |i| {
                                 switch (i) {

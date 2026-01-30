@@ -13,18 +13,6 @@ As a general disclaimer, this project is / was a huge learning experience for me
 This project has been insufficiently scrutenized to take its outputs as serious and correct. 
 It looks cool though.
 
-## Current Features
-
--   **eBPF Profiling**: Samples **Kernel** and **User** space stacks. We use `bpf_dynptr` to send only the required 
-    bytes in the ringbuffer (the means of communicating with the userspace `flametui` program).
--   **Terminal UI**: A basic interface powered by [vaxis](https://github.com/rockorager/vaxis) that plots the flamegrah
-    using YOUR terminal colors! We query them, then compute "pertubations" depending on a hash of the resolved symbol names.
--   **Symbol Resolution**:
-    -   **Kernel**: Lookups via `/proc/kallsyms`.
-    -   **User**: Basic parsing of ELF shared objects mapped via `/proc/{pid}/maps`.
-    -   **Demangling**: Simple C++ symbol demangling.
--   **Inspection**: Mouse hover to view hit counts and symbol names.
-
 ## Usage
 
 As `vaxis` pins `0.15.1`, this is the required version. Note that we supply a flake.nix such that you can use my 

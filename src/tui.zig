@@ -34,8 +34,6 @@ fn dimColor(color: vaxis.Color, t: f32) vaxis.Color {
 
 /// Object managing plotting and events
 pub const Interface = struct {
-    backgroundGradientBeg: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xB0 } },
-    backgroundGradientEnd: vaxis.Color = .{ .rgb = .{ 0xEE, 0xEE, 0xEE } },
     textColor: vaxis.Color = .{ .index = 15 },
     rootColor: vaxis.Color = .{ .index = 1 },
     kernColor: vaxis.Color = .{ .index = 2 },
@@ -156,8 +154,11 @@ pub const Interface = struct {
         // Configure vaxis
         try vx.setMouseMode(tty.writer(), true);
         defer vx.setMouseMode(tty.writer(), false) catch @panic("couldn't unset mouse mode");
+
+        // 
         try vx.enterAltScreen(tty.writer());
         defer vx.exitAltScreen(tty.writer()) catch @panic("couldn't exit alt screen");
+
         try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
 
         try loop.start();
@@ -165,6 +166,7 @@ pub const Interface = struct {
 
         var mouse: ?vaxis.Mouse = null;
 
+        // Somewhat arbitrarily I chose this color to show
         try vx.queryColor(tty.writer(), .{ .index = 1 });
         try vx.queryColor(tty.writer(), .{ .index = 2 });
         try vx.queryColor(tty.writer(), .{ .index = 4 });
@@ -176,6 +178,7 @@ pub const Interface = struct {
                 // Handle events
                 switch (event) {
                     .color_report => |c| {
+                        // We query to do the fancy pants gradients!! Yes
                         switch (c.kind) {
                             .index => |i| {
                                 switch (i) {
@@ -196,19 +199,22 @@ pub const Interface = struct {
                                     },
                                     else => {},
                                 }
-                                self.textColor = vaxis.Color{ .index = i };
                             },
                             else => {},
                         }
                     },
+                    // Presses
                     .key_press => |key| {
+                        // Quit conditions
                         if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                             break :tui_loop;
                         }
                     },
+                    // Our resize logic
                     .winsize => |winsize| {
                         try vx.resize(self.allocator, tty.writer(), winsize);
                     },
+                    // Mouse
                     .mouse => |m| {
                         mouse = m;
                     },
@@ -222,16 +228,17 @@ pub const Interface = struct {
             }
 
             // var timer = try std.time.Timer.start();
+            
             {
                 self.infoSlice0 = null;
                 self.infoSlice1 = null;
                 self.infoSlice2 = null;
 
                 const win = vx.window();
-                win.clear();
                 try self.draw(win, mouse);
                 try vx.render(tty.writer());
             }
+
             // const elapsed_ns = timer.read();
             // std.debug.print("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
@@ -249,28 +256,6 @@ pub const Interface = struct {
     const InfoBorderHBeg = 2;
     const InfoBorderHEnd = 1;
 
-    // Clear a window with a nice gradient background
-    fn drawBackgroundGradient(self: Interface, win: vaxis.Window) void {
-        const h = win.height;
-        const w = win.width;
-
-        for (0..h) |y| {
-            const alpha = 1.0 - @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(h - 1));
-            const color = lerpColor(self.backgroundGradientBeg, self.backgroundGradientEnd, alpha);
-            for (0..w) |x| {
-                win.writeCell(@intCast(x), @intCast(y), .{
-                    .char = .{ .grapheme = " " },
-                    .style = .{ .bg = color },
-                });
-            }
-        }
-    }
-
-    fn drawBackground(self: Interface, win: vaxis.Window) void {
-        _ = win;
-        _ = self;
-    }
-
     // Draw a border
     fn drawBorder(self: Interface, title: []const u8, window: vaxis.Window, x1: u16, y1: u16, x2: u16, y2: u16, color: vaxis.Color) void {
         const style = vaxis.Style{
@@ -278,26 +263,33 @@ pub const Interface = struct {
             .bold = true,
         };
 
-        // Using Rounded corners for a more modern feel
+        // Corners
         self.drawCellOverBackground(window, x1, y1, "╔", style);
         self.drawCellOverBackground(window, x2, y1, "╗", style);
+
+        // Verticals
+        for ((y1 + 1)..y2) |y| {
+            self.drawCellOverBackground(window, x1, @intCast(y), "║", style);
+            self.drawCellOverBackground(window, x2, @intCast(y), "║", style);
+        }
+
+        // Corners
         self.drawCellOverBackground(window, x1, y2, "╚", style);
         self.drawCellOverBackground(window, x2, y2, "╝", style);
 
-        // Standard lines for sides
+        // Horitontal
         for ((x1 + 1)..x2) |x| {
             self.drawCellOverBackground(window, @intCast(x), y1, "═", style);
             self.drawCellOverBackground(window, @intCast(x), y2, "═", style);
         }
 
-        for (0..title.len) |i| {
-            self.drawCellOverBackground(window, x1 + 2 + @as(u16, @intCast(i)), y1, (&title[i])[0..1], style);
-        }
-
-        for ((y1 + 1)..y2) |y| {
-            self.drawCellOverBackground(window, x1, @intCast(y), "║", style);
-            self.drawCellOverBackground(window, x2, @intCast(y), "║", style);
-        }
+        // Print
+        _ = vaxis.Window.printSegment(window, vaxis.Cell.Segment{ .text = title, .style = style, .link = .{} }, .{
+            .col_offset = x1 + 2,
+            .row_offset = y1,
+            .commit = true,
+            .wrap = .none,
+        });
     }
 
     fn drawInfo(self: Interface, window: vaxis.Window) void {
@@ -350,7 +342,9 @@ pub const Interface = struct {
     // Draw everything to the window
     fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
         // Clear the background
-        self.drawBackground(win);
+        win.clear();
+        
+        // Draw the flamegraph box
         self.drawBorder(
             "FlameGraph",
             win,
@@ -361,6 +355,7 @@ pub const Interface = struct {
             self.textColor,
         );
 
+        // Draw the info box
         self.drawBorder(
             "NodeInfo",
             win,
@@ -383,7 +378,6 @@ pub const Interface = struct {
             const flamegraphH = win.height - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
 
             // Draw recursively, first node is the root node
-            std.debug.assert(symbols.nodes.items[0].payload == .root);
             try self.drawSymbol(symbols.nodes.items[0], win, mouse, .{
                 // We want to draw 100% of the availible space
                 .widthNormalized = 1.0,
@@ -435,8 +429,11 @@ pub const Interface = struct {
         };
 
         // The Y coordinate is fixed and given by the arguments. We have to calculate the X coordinate though.
-        const rawBegX = (context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + @as(f32, @floatFromInt(context.currentX));
-        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + @as(f32, @floatFromInt(context.currentX));
+        const rawBegX = (context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
+            @as(f32, @floatFromInt(context.currentX));
+        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
+            @as(f32, @floatFromInt(context.currentX));
+
         const begX: u16 = @intFromFloat(rawBegX);
         const endX: u16 = @intFromFloat(rawEndX);
         const len = endX - begX;

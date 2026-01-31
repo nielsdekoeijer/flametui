@@ -6,12 +6,13 @@ This repository presents **flametui**, an experimental Linux system profiler tha
 The fun part of this project is that it draws a flamegraph, in the TUI! 
 This tool uses eBPF to hook into the Linux kernel's `perf_event` subsystem, sampling stack traces across CPUs. 
 It tries to aggregate these traces in userspace and resolve them to human-readable symbols for visualization. 
-I always found it a bit annoying to have to install a bunch of different tools to get a flamegraph. 
-This tool aims to provide an all-in-one solution.
 
-As a general disclaimer, this project is / was a huge learning experience for me.
+The origin story is that I always found it a bit annoying to have to install a bunch of different tools to get a flamegraph. 
+Thus, this tool aims to provide an all-in-one solution: being able to measure and visualize in one go!
+
+As a general disclaimer, this project is / was a huge learning experience for me, and written largely for my own enjoyment.
 This project has been insufficiently scrutenized to take its outputs as serious and correct. 
-It looks cool though.
+It looks cool though!
 
 ## Usage
 
@@ -34,8 +35,22 @@ sudo zig-out/bin/flametui --hz 49 --time 1000
 There are several areas where this project could be improved:
 
 - [ ] **Libelf Integration**: I'm not sure, but using libbelf might be more robust than manually parsing it with `std.elf` from zig.
+        This is based on my 
+        This is TBD and I am researching this.
 - [ ] **Streaming**: Currently, data collection and visualization are separate phases, so I want to implement streaming.
         This would allow us to view the graph evolve during profiling...! That's really cool. I am also keen to explore
-        Further visualization options: moving-average flamegraphs, etc. 
+        Further visualization options: real-time moving-average flamegraphs, etc.  
 - [ ] **Navigation**: Adding scrolling and zooming capabilities to handle larger traces.
 - [ ] **Better UX**: Improving the overall responsiveness and interactivity. Currently, my vaxis impl. is giga janky.
+- [ ] **Read Existing Formats**: The handcrafted profiler is weak, and it will likely be lapped by competitors. Thus, 
+        I want to support the folded stack format so my program can also be used as a flamegrah viewer for more 
+        sophisticated tools.
+- [ ] **Write Existing Formats**: If for some arcane reason someone wants to serialize their measurement, we should
+        Allow that.
+- [ ] **Help Menu**: To see what the keybindings are. Not important currently, cause I dont have keybindings.
+
+## AI Usage Disclaimer
+More or less all code was hand-written, but AI was used heavily in researching both e-BPF, how to create flamegraphs,
+and. Personally, I enjoy generative AI the most for doing research and learning. I think this applies especially to 
+software, as software allows for rapid hypothesis testing: even if the LLM barfs some nonesense, you can easily fact
+check it in many cases. This is less true in other disciplines. 

@@ -39,64 +39,104 @@ pub const Interface = struct {
     kernColor: vaxis.Color = .{ .index = 2 },
     userColor: vaxis.Color = .{ .index = 4 },
 
-    infoBuf0: [512]u8 = std.mem.zeroes([512]u8),
-    infoSlice0: ?[]u8 = null,
-    infoBuf1: [512]u8 = std.mem.zeroes([512]u8),
-    infoSlice1: ?[]u8 = null,
-    infoBuf2: [512]u8 = std.mem.zeroes([512]u8),
-    infoSlice2: ?[]u8 = null,
+    // Pre-reseve a buffer and a slice to the hit count we optionally print on screen
+    infoBufHitCount: [512]u8 = std.mem.zeroes([512]u8),
+    infoSliceHitCount: ?[]u8 = null,
 
+    // Pre-reseve a buffer and a slice to the symbol name we optionally print on screen
+    infoBufSymbol: [512]u8 = std.mem.zeroes([512]u8),
+    infoSliceSymbol: ?[]u8 = null,
+
+    // Pre-reseve a buffer and a slice to the shared object name we optionally print on screen
+    infoBufSharedObjectName: [512]u8 = std.mem.zeroes([512]u8),
+    infoSliceSharedObjectName: ?[]u8 = null,
+
+    // Owns an allocator, arguably better if unmanaged
+    // TODO: make interface unmanaged
     allocator: std.mem.Allocator,
+
+    // We want the interface to be able to dynamically swap symbols tries in order to allow for updates, likely
+    // with some triple buffering setup
+    // TODO: likely, we will have multiple threads. Thus, we want to have a mutex to guard the symboltrie.
+    // TODO: eventually, we want to support the output of e.g. perf or collapsed stack traces.
     symbols: ?*SymbolTrie,
 
-    /// Colors using greg's original version
-    pub fn getColorFromName(self: Interface, symbolName: []const u8, node: SymbolTrie.TrieNode) vaxis.Color {
-        const hashName = struct {
-            pub fn hashName(name: []const u8, reverse: bool) f32 {
-                var vector: f32 = 0;
-                var weight: f32 = 1;
-                var max: f32 = 1;
-                var mod: f32 = 10;
+    // Bare-bones init
+    pub fn init(allocator: std.mem.Allocator) !Interface {
+        return Interface{
+            .allocator = allocator,
+            .symbols = null,
+        };
+    }
 
-                for (0..name.len) |i| {
-                    const idx = blk: {
-                        if (reverse) {
-                            break :blk i;
-                        } else {
-                            break :blk name.len - 1 - i;
-                        }
-                    };
+    // Hashing function for consistent randomization of colors, using Greg's original
+    fn hashName(name: []const u8, reverse: bool) f32 {
+        var vector: f32 = 0;
+        var weight: f32 = 1;
+        var max: f32 = 1;
+        var mod: f32 = 10;
 
-                    const chr = name[idx];
-                    const val = @as(f32, @floatFromInt(@mod(chr, @as(u8, @intFromFloat(mod)))));
-
-                    vector += (val / (mod - 1.0)) * weight;
-                    max += weight;
-                    weight *= 0.70;
-                    mod += 1;
-
-                    if (mod > 12) {
-                        break;
-                    }
+        for (0..name.len) |i| {
+            const idx = blk: {
+                if (reverse) {
+                    break :blk i;
+                } else {
+                    break :blk name.len - 1 - i;
                 }
+            };
 
-                return (1.0 - (vector / max));
+            const chr = name[idx];
+            const val = @as(f32, @floatFromInt(@mod(chr, @as(u8, @intFromFloat(mod)))));
+
+            vector += (val / (mod - 1.0)) * weight;
+            max += weight;
+            weight *= 0.70;
+            mod += 1;
+
+            if (mod > 12) {
+                break;
             }
-        }.hashName;
+        }
 
+        return (1.0 - (vector / max));
+    }
+
+    /// Colors using greg's original version, provides the classic "flames" for flamegraphs.
+    /// TODO: We don't differentiate per nodes, does original flamegraphs not do this?
+    fn getColorFromNameOriginal(self: Interface, symbolName: []const u8, node: SymbolTrie.TrieNode) vaxis.Color {
+        _ = self;
+        _ = node;
+
+        const v1 = hashName(symbolName, true);
+        const v2 = hashName(symbolName, false);
+        const v3 = v2;
+
+        return .{
+            .rgb = .{
+                @as(u8, @intFromFloat(50.0 * v3)) + 205,
+                @as(u8, @intFromFloat(230.0 * v1)),
+                @as(u8, @intFromFloat(55.0 * v2)),
+            },
+        };
+    }
+
+    /// Colors using OUR color approach, based on the users color scheme!
+    fn getColorFromName(self: Interface, symbolName: []const u8, node: SymbolTrie.TrieNode) vaxis.Color {
         const v1 = 0.5 - hashName(symbolName, true);
         const v2 = 0.5 - hashName(symbolName, false);
         const v3 = v2;
 
+        // TODO: spaghetti, refactor this so that baseColor is provided as an input argument
         const baseColor = switch (node.payload) {
-            .kernel => self.kernColor, // Use the user's Native Red for kernel
-            .user => self.userColor, // Use the user's Native Green for user space
-            .root => self.rootColor, // Use the user's Native Yellow for root
+            .kernel => self.kernColor,
+            .user => self.userColor,
+            .root => self.rootColor,
         };
 
         switch (baseColor) {
             .rgb => return vaxis.Color{
                 .rgb = .{
+                    // TODO: refactor using saturating adds, this code lookes like shit man
                     @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v3)) + @as(i16, @intCast(baseColor.rgb[0])))))),
                     @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v1)) + @as(i16, @intCast(baseColor.rgb[1])))))),
                     @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v2)) + @as(i16, @intCast(baseColor.rgb[2])))))),
@@ -104,30 +144,20 @@ pub const Interface = struct {
             },
             else => return baseColor,
         }
-
-        // return .{
-        //     .rgb = .{
-        //         @as(u8, @intFromFloat(50.0 * v3)) + 205,
-        //         @as(u8, @intFromFloat(230.0 * v1)),
-        //         @as(u8, @intFromFloat(55.0 * v2)),
-        //     },
-        // };
     }
 
     // Vaxis events we want to subscribe to
     const Event = union(enum) {
+        // User IO
         key_press: vaxis.Key,
-        winsize: vaxis.Winsize,
         mouse: vaxis.Mouse,
+
+        // Resize
+        winsize: vaxis.Winsize,
+
+        // When we query the colors for the TUI
         color_report: vaxis.Color.Report,
     };
-
-    pub fn init(allocator: std.mem.Allocator) !Interface {
-        return Interface{
-            .allocator = allocator,
-            .symbols = null,
-        };
-    }
 
     // Switch out the symboltrie we use on the backend
     // TODO: this is shit we should improve it
@@ -147,6 +177,9 @@ pub const Interface = struct {
         var vx = try vaxis.init(self.allocator, .{});
         defer vx.deinit(self.allocator, tty.writer());
 
+        // Configure
+        try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+
         // Setup event loop
         var loop = vaxis.Loop(Event){ .tty = &tty, .vaxis = &vx };
         try loop.init();
@@ -155,22 +188,21 @@ pub const Interface = struct {
         try vx.setMouseMode(tty.writer(), true);
         defer vx.setMouseMode(tty.writer(), false) catch @panic("couldn't unset mouse mode");
 
-        // 
+        // Enter
         try vx.enterAltScreen(tty.writer());
         defer vx.exitAltScreen(tty.writer()) catch @panic("couldn't exit alt screen");
 
-        try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
-
+        // Start measuring events
         try loop.start();
         defer loop.stop();
-
-        var mouse: ?vaxis.Mouse = null;
 
         // Somewhat arbitrarily I chose this color to show
         try vx.queryColor(tty.writer(), .{ .index = 1 });
         try vx.queryColor(tty.writer(), .{ .index = 2 });
         try vx.queryColor(tty.writer(), .{ .index = 4 });
 
+        // Main loop
+        var mouse: ?vaxis.Mouse = null;
         tui_loop: while (true) {
             var event = loop.nextEvent();
 
@@ -227,20 +259,22 @@ pub const Interface = struct {
                 }
             }
 
-            // var timer = try std.time.Timer.start();
-            
-            {
-                self.infoSlice0 = null;
-                self.infoSlice1 = null;
-                self.infoSlice2 = null;
+            while (true) {
+                var timer = try std.time.Timer.start();
 
-                const win = vx.window();
-                try self.draw(win, mouse);
-                try vx.render(tty.writer());
+                {
+                    self.infoSliceHitCount = null;
+                    self.infoSliceSymbol = null;
+                    self.infoSliceSharedObjectName = null;
+
+                    const win = vx.window();
+                    try self.draw(win, mouse);
+                    try vx.render(tty.writer());
+                }
+
+                const elapsed_ns = timer.read();
+                std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
             }
-
-            // const elapsed_ns = timer.read();
-            // std.debug.print("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
     }
 
@@ -293,7 +327,7 @@ pub const Interface = struct {
     }
 
     fn drawInfo(self: Interface, window: vaxis.Window) void {
-        if (self.infoSlice0) |slice| {
+        if (self.infoSliceHitCount) |slice| {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
@@ -308,7 +342,7 @@ pub const Interface = struct {
             }
         }
 
-        if (self.infoSlice1) |slice| {
+        if (self.infoSliceSymbol) |slice| {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
@@ -323,7 +357,7 @@ pub const Interface = struct {
             }
         }
 
-        if (self.infoSlice2) |slice| {
+        if (self.infoSliceSharedObjectName) |slice| {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
@@ -343,7 +377,7 @@ pub const Interface = struct {
     fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
         // Clear the background
         win.clear();
-        
+
         // Draw the flamegraph box
         self.drawBorder(
             "FlameGraph",
@@ -402,7 +436,7 @@ pub const Interface = struct {
         self.drawInfo(win);
     }
 
-    pub fn drawSymbol(
+    fn drawSymbol(
         self: *Interface,
         entry: SymbolTrie.TrieNode,
         win: vaxis.Window,
@@ -444,17 +478,17 @@ pub const Interface = struct {
             if ((begX <= m.col and m.col < endX) and m.row == context.currentY) {
                 switch (entry.payload) {
                     .kernel => |payload| {
-                        self.infoSlice0 = try std.fmt.bufPrint(&self.infoBuf0, "hit count:     {}", .{entry.hitCount});
-                        self.infoSlice1 = try std.fmt.bufPrint(&self.infoBuf1, "[user] symbol: {s}", .{payload.symbol});
+                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[user] symbol: {s}", .{payload.symbol});
                     },
                     .root => |payload| {
-                        self.infoSlice0 = try std.fmt.bufPrint(&self.infoBuf0, "hit count:     {}", .{entry.hitCount});
-                        self.infoSlice1 = try std.fmt.bufPrint(&self.infoBuf1, "[root] symbol: {s}", .{payload.symbol});
+                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[root] symbol: {s}", .{payload.symbol});
                     },
                     .user => |payload| {
-                        self.infoSlice0 = try std.fmt.bufPrint(&self.infoBuf0, "hit count:     {}", .{entry.hitCount});
-                        self.infoSlice1 = try std.fmt.bufPrint(&self.infoBuf1, "[kern] symbol: {s}", .{payload.symbol});
-                        self.infoSlice2 = try std.fmt.bufPrint(&self.infoBuf2, "object:        {s}", .{payload.dll});
+                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[kern] symbol: {s}", .{payload.symbol});
+                        self.infoSliceSharedObjectName = try std.fmt.bufPrint(&self.infoBufSharedObjectName, "object:        {s}", .{payload.dll});
                     },
                 }
                 style.bg = dimColor(style.bg, 0.7);

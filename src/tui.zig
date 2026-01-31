@@ -5,6 +5,143 @@ const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 /// ===================================================================================================================
 /// TUI
 /// ===================================================================================================================
+
+// TODO: Kind of not robust, probably better to use actual vaxis apis. I can't be bothered with that though,
+// moreover this might be easier to swap out to a different plotting library (or roll our own?) down the line
+const Canvas = struct {
+    // Fixed constants, w.r.t provided window, where to start drawing certain things
+    // This way of doing it is somewhat not robust, but essentially our window ought to look like:
+    //
+    // ```
+    // (0,0)                                                        (W-1,0)
+    // o------------------------------------------------------------------o
+    // |                                                                  |
+    // | o-FlameGraph---------------------------------------------------o | <-- FlamegraphBorderHBegBoundary
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | o--------------------------------------------------------------o | <-- FlamegraphBorderHEndBoundary
+    // |                                                                  | <-- divider
+    // | o-Info---------------------------------------------------------o |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | |                                                              | |
+    // | o--------------------------------------------------------------o |
+    // |                                                                  |
+    // o------------------------------------------------------------------o
+    // (0,H-1)                                                    (W-1,H-1)
+    //
+    // ```
+
+    // Divider w.r.t. the bottom, i.e. height - 1
+    const DividerBottomOffsetY = 7;
+
+    // The offset from edges (i.e. 0, width - 1)
+    const FlamegraphWBegBoundary = 1;
+    const FlamegraphWEndBoundary = 1;
+
+    // The offset from edges (i.e. 0 and divider)
+    const FlamegraphHBegBoundary = 1;
+    const FlamegraphHEndBoundary = 1;
+
+    // The offset from edges (i.e. 0, width - 1)
+    const FlamegraphWBegInside = FlamegraphWBegBoundary + 1;
+    const FlamegraphWEndInside = FlamegraphWEndBoundary + 1;
+
+    // The offset from edges (i.e. 0 and divider)
+    const FlamegraphHBegInside = FlamegraphHBegBoundary + 1;
+    const FlamegraphHEndInside = FlamegraphHEndBoundary + 1;
+
+    // The offset from edges (i.e. 0, width - 1)
+    const InfoWBegBoundary = 1;
+    const InfoWEndBoundary = 1;
+
+    // The offset from edges (i.e. divider, height - 1)
+    const InfoHBegBoundary = 1;
+    const InfoHEndBoundary = 1;
+
+    // The offset from edges (i.e. 0, width - 1)
+    const InfoWBegInside = InfoWBegBoundary + 1;
+    const InfoWEndInside = InfoWEndBoundary - 1;
+
+    // The offset from edges (i.e. divider, height - 1)
+    const InfoHBegInside = InfoHBegBoundary + 1;
+    const InfoHEndInside = InfoHEndBoundary - 1;
+
+    const FlamegraphAreaTitle = "Flamegraph";
+    const InfoAreaTitle = "Info";
+
+    flamegraphWindowBegBoundaryX: u16,
+    flamegraphWindowBegBoundaryY: u16,
+    flamegraphWindowEndBoundaryX: u16,
+    flamegraphWindowEndBoundaryY: u16,
+    flamegraphWindowBegInsideX: u16,
+    flamegraphWindowBegInsideY: u16,
+    flamegraphWindowEndInsideX: u16,
+    flamegraphWindowEndInsideY: u16,
+
+    infoWindowBegBoundaryX: u16,
+    infoWindowBegBoundaryY: u16,
+    infoWindowEndBoundaryX: u16,
+    infoWindowEndBoundaryY: u16,
+    infoWindowBegInsideX: u16,
+    infoWindowBegInsideY: u16,
+    infoWindowEndInsideX: u16,
+    infoWindowEndInsideY: u16,
+
+    pub fn init(win: vaxis.Window) !Canvas {
+        std.debug.assert(win.x_off == 0);
+        std.debug.assert(win.y_off == 0);
+
+        if (win.height <= DividerBottomOffsetY + FlamegraphHBegBoundary) {
+            return error.InsufficientHeight;
+        }
+
+        if (win.width <= FlamegraphWBegBoundary + FlamegraphWEndBoundary) {
+            return error.InsufficientWidth;
+        }
+
+        // positions inclusive
+        const windowBegX = 0;
+        const windowEndX = win.width;
+        const windowBegY = 0;
+        const windowEndY = win.height;
+
+        // divider
+        // const dividerBegX =  windowBegX;
+        // const dividerEndX =  windowEndX;
+        const dividerBegY = windowEndY - DividerBottomOffsetY;
+        // const dividerEndY =  windowEndY;
+
+        return Canvas{
+            .flamegraphWindowBegBoundaryX = windowBegX + FlamegraphWBegBoundary,
+            .flamegraphWindowBegBoundaryY = windowBegY + FlamegraphHBegBoundary,
+            .flamegraphWindowEndBoundaryX = windowEndX - FlamegraphWEndBoundary,
+            .flamegraphWindowEndBoundaryY = dividerBegY - FlamegraphHEndBoundary,
+            .flamegraphWindowBegInsideX = windowBegX + FlamegraphWBegInside,
+            .flamegraphWindowBegInsideY = windowBegY + FlamegraphHBegInside,
+            .flamegraphWindowEndInsideX = windowEndX - FlamegraphWEndInside,
+            .flamegraphWindowEndInsideY = dividerBegY - FlamegraphHEndInside,
+            .infoWindowBegBoundaryX = windowBegX + InfoWBegBoundary,
+            .infoWindowBegBoundaryY = dividerBegY + InfoHBegBoundary,
+            .infoWindowEndBoundaryX = windowEndX - InfoWBegBoundary,
+            .infoWindowEndBoundaryY = windowEndY - InfoHEndBoundary,
+            .infoWindowBegInsideX = windowBegX + InfoWBegInside,
+            .infoWindowBegInsideY = dividerBegY + InfoHBegInside,
+            .infoWindowEndInsideX = windowEndX - InfoWBegInside,
+            .infoWindowEndInsideY = windowEndY - InfoHEndInside,
+        };
+    }
+};
+
 /// Helper that leprs between two vaxis colors with interpolation parameter t
 fn lerpColor(a: vaxis.Color, b: vaxis.Color, t: f32) vaxis.Color {
     return .{
@@ -259,28 +396,31 @@ pub const Interface = struct {
                 }
             }
 
-            while (true) {
-                var timer = try std.time.Timer.start();
+            var timer = try std.time.Timer.start();
+            {
+                self.infoSliceHitCount = null;
+                self.infoSliceSymbol = null;
+                self.infoSliceSharedObjectName = null;
 
-                {
-                    self.infoSliceHitCount = null;
-                    self.infoSliceSymbol = null;
-                    self.infoSliceSharedObjectName = null;
-
-                    const win = vx.window();
-                    try self.draw(win, mouse);
-                    try vx.render(tty.writer());
-                }
-
-                const elapsed_ns = timer.read();
-                std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
+                const win = vx.window();
+                try self.draw(win, mouse);
+                try vx.render(tty.writer());
             }
+
+            const elapsed_ns = timer.read();
+            std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
     }
 
-    // Padding for the flamegrapg, we plot it slightly offset
-    const FlamegraphBorderWBeg = 3;
-    const FlamegraphBorderWEnd = 4;
+    // TODO: define the minimum and maximum size (oom) for the window such that we bail out when we obtain it
+    // TODO: fuzz interactions + sizes to prevent crashes?
+
+    // Padding for the flamegraph, we plot it slightly offset. We define "inside" (inside the border) and "border"
+    // which means where the border is exactly.
+    const FlamegraphBorderWBegBoundary = 3;
+    const FlamegraphBorderWBegInside = 4;
+    const FlamegraphBorderWEndBoundary = 3;
+    const FlamegraphBorderWEndInside = 4;
     const FlamegraphBorderHBeg = 2;
     const FlamegraphBorderHEnd = 10;
 
@@ -298,8 +438,14 @@ pub const Interface = struct {
         };
 
         // Corners
-        self.drawCellOverBackground(window, x1, y1, "╔", style);
-        self.drawCellOverBackground(window, x2, y1, "╗", style);
+        window.writeCell(x1, y1, .{
+            .char = .{ .grapheme = "╔" },
+            .style = style,
+        });
+        window.writeCell(x2, y1, .{
+            .char = .{ .grapheme = "╗" },
+            .style = style,
+        });
 
         // Verticals
         for ((y1 + 1)..y2) |y| {
@@ -308,8 +454,14 @@ pub const Interface = struct {
         }
 
         // Corners
-        self.drawCellOverBackground(window, x1, y2, "╚", style);
-        self.drawCellOverBackground(window, x2, y2, "╝", style);
+        window.writeCell(x1, y2, .{
+            .char = .{ .grapheme = "╚" },
+            .style = style,
+        });
+        window.writeCell(x2, y2, .{
+            .char = .{ .grapheme = "╝" },
+            .style = style,
+        });
 
         // Horitontal
         for ((x1 + 1)..x2) |x| {
@@ -331,7 +483,7 @@ pub const Interface = struct {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
-                    FlamegraphBorderWBeg + @as(u16, @intCast(i)),
+                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
                     window.height - FlamegraphBorderHEnd + 3,
                     (&slice[i])[0..1],
                     .{
@@ -346,7 +498,7 @@ pub const Interface = struct {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
-                    FlamegraphBorderWBeg + @as(u16, @intCast(i)),
+                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
                     window.height - FlamegraphBorderHEnd + 4,
                     (&slice[i])[0..1],
                     .{
@@ -361,7 +513,7 @@ pub const Interface = struct {
             for (0..slice.len) |i| {
                 self.drawCellOverBackground(
                     window,
-                    FlamegraphBorderWBeg + @as(u16, @intCast(i)),
+                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
                     window.height - FlamegraphBorderHEnd + 5,
                     (&slice[i])[0..1],
                     .{
@@ -378,38 +530,22 @@ pub const Interface = struct {
         // Clear the background
         win.clear();
 
+        // Compute the canvas, will error if our window is too small
+        const canvas = Canvas.init(win) catch return;
+
         // Draw the flamegraph box
-        self.drawBorder(
-            "FlameGraph",
-            win,
-            FlamegraphBorderWBeg - 1,
-            FlamegraphBorderHBeg - 1,
-            win.width - FlamegraphBorderWEnd + 1,
-            win.height - FlamegraphBorderHEnd + 1,
-            self.textColor,
-        );
+        self.drawBorder("FlameGraph", win, canvas.flamegraphWindowBegBoundaryX, canvas.flamegraphWindowBegBoundaryY, //
+            canvas.flamegraphWindowEndBoundaryX, canvas.flamegraphWindowEndBoundaryY, self.textColor);
 
         // Draw the info box
-        self.drawBorder(
-            "NodeInfo",
-            win,
-            InfoBorderWBeg - 1,
-            win.height - FlamegraphBorderHEnd - InfoBorderHEnd + 3,
-            win.width - FlamegraphBorderWEnd + 1,
-            win.height - InfoBorderHBeg + 1,
-            self.textColor,
-        );
+        self.drawBorder("NodeInfo", win, canvas.infoWindowBegBoundaryX, canvas.infoWindowBegBoundaryY, //
+            canvas.infoWindowEndBoundaryX, canvas.infoWindowEndBoundaryY, self.textColor);
 
         // We may not have any symbols loaded, in which case return
         if (self.symbols) |symbols| {
-            const toSmallW = win.width <= FlamegraphBorderWBeg + FlamegraphBorderWEnd;
-            const toSmallH = win.height <= FlamegraphBorderHBeg + FlamegraphBorderHEnd;
-
-            if (toSmallW or toSmallH) return;
-
             // Internal size exclusive of the border
-            const flamegraphW = win.width - FlamegraphBorderWBeg - FlamegraphBorderWEnd - 1;
-            const flamegraphH = win.height - FlamegraphBorderHBeg - FlamegraphBorderHEnd;
+            const flamegraphW = canvas.flamegraphWindowEndInsideX - canvas.flamegraphWindowBegInsideX + 1; 
+            const flamegraphH = canvas.flamegraphWindowEndInsideY - canvas.flamegraphWindowBegInsideY + 1; 
 
             // Draw recursively, first node is the root node
             try self.drawSymbol(symbols.nodes.items[0], win, mouse, .{
@@ -426,14 +562,16 @@ pub const Interface = struct {
                 .heightCells = flamegraphH,
 
                 // Where to start drawing X coord
-                .currentX = FlamegraphBorderWBeg + 1,
+                .currentX = canvas.flamegraphWindowBegInsideX,
 
                 // Where to start drawing Y coord
-                .currentY = win.height - FlamegraphBorderHEnd,
+                .currentY = canvas.flamegraphWindowEndInsideY,
             });
-        }
 
-        self.drawInfo(win);
+            self.drawInfo(win);
+        } else {
+            return;
+        }
     }
 
     fn drawSymbol(

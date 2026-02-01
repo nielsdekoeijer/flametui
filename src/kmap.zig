@@ -13,15 +13,23 @@ pub const KMapEntry = struct {
 };
 
 /// Model of the symbols in /proc/kallsyms
-/// TODO: confirm that this one is static, do we need a cache and check for invalidation?
 /// TODO: write unit tests
 pub const KMapUnmanaged = struct {
     /// Kernel map, a model of /proc/kallsyms
     backend: std.ArrayListUnmanaged(KMapEntry),
 
+    // TODO: this is kind of a hack to make the non-recording workflow boot faster. Probably we can do better.
+    // Basically, we conflate the logic in the SymbolTrie to "need" a kmap for the "add" function. The thing is,
+    // when we load from file we don't need to "add" shit, so probably I should have another type entirely
+    pub fn initEmpty(allocator: std.mem.Allocator) !KMapUnmanaged {
+        return KMapUnmanaged{
+            .backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 0),
+        };
+    }
+
     pub fn init(allocator: std.mem.Allocator) !KMapUnmanaged {
-        // Allocate backend
-        var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 0);
+        // Allocate backend, with a huge size
+        var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 512_000);
         errdefer {
             for (backend.items) |entry| allocator.free(entry.symbol);
             backend.deinit(allocator);
@@ -31,12 +39,15 @@ pub const KMapUnmanaged = struct {
         const file = try std.fs.openFileAbsolute("/proc/kallsyms", .{});
         defer file.close();
 
-        // Read the file
-        var buf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(&buf);
+        // Grab the whole file, note that this file is massive (20 MB+) and this just takes a long time.
+        // We assume the kmap static. This likely a big approximation. 
+        const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+        defer allocator.free(content);
 
         // Populate + sort
-        try populate(allocator, &backend, &reader.interface);
+        try populate(allocator, &backend, content);
+
+        // I'm pretty sure we don't have to sort it, but I'm gonna do it anyway
         sort(&backend);
 
         return KMapUnmanaged{
@@ -71,37 +82,26 @@ pub const KMapUnmanaged = struct {
     }
 
     // Helper function that populates the map
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntry), reader: *std.Io.Reader) !void {
+    // Works as follows, splits into fields:
+    // Note that the line has the following structure:
+    //
+    // ```
+    // 0000000000000000 T srso_alias_untrain_ret<\t>[module]<\t>metadata<\n>
+    // <-- 16 chars -->   <-- from index 19 onwards                      -->
+    // ```
+    //
+    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntry), content: []const u8) !void {
+        var lines = std.mem.tokenizeScalar(u8, content, '\n');
+
         // Loop through file contents
-        while (true) {
-            // Read until we cannot take more lines --> implies EOF
-            var line = reader.takeDelimiterExclusive('\n') catch break;
-
-            // Remove carriage returns
-            line = @constCast(std.mem.trim(u8, line, "\r\t "));
-
-            // Split into fields.
-            // Note that the line has the following structure:
-            //
-            // ```
-            // 0000000000000000 T srso_alias_untrain_ret
-            // ```
-            var iter = std.mem.splitAny(u8, line, " \t");
+        while (lines.next()) |line| {
 
             // Grab the address
-            const addressString = iter.next() orelse continue;
-            const address = std.fmt.parseInt(u64, addressString, 16) catch continue;
-
-            // Skip the type
-            const @"type" = iter.next();
-            _ = @"type";
+            const address = std.fmt.parseInt(u64, line[0..16], 16) catch continue;
 
             // Read the symbol, duplicate our own copy
+            var iter = std.mem.splitScalar(u8, line[19..], '\t');
             const symbolString = iter.next() orelse continue;
-
-            // Note: theres a chance there's another field, like [i915] or [bpf]. I just toss that now. I think
-            // its the kernel module the call belongs to? Maybe this is intreesting to store. 
-            // TODO: decide if to store, does make symbol resolution slower...
 
             // Append to our representation
             // Note that we own the memory, and thus must clean it

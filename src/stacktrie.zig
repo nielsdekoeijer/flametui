@@ -99,7 +99,7 @@ pub const StackTrie = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !StackTrie {
-        var nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 0);
+        var nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024);
 
         // Initialize the root
         try nodes.append(allocator, .{

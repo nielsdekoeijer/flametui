@@ -400,7 +400,7 @@ pub const Interface = struct {
         defer vx.deinit(self.allocator, tty.writer());
 
         // Configure
-        try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+        try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_ms);
 
         // Setup event loop
         var loop = vaxis.Loop(Event){ .tty = &tty, .vaxis = &vx };

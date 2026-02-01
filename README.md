@@ -68,6 +68,7 @@ There are several areas where this project could be improved:
 - [ ] **Consider dynamic KMap**: Currently, I assume the kernel symbol map is static. I'm pretty sure when you add a 
         kernel module or an ebpf program `/proc/kallsyms` changes. We can consider robustness to this, or not and 
         ensure a good message when we cant find it.
+- [ ] **Tests**: I love tests, but I have zero. What the hell?
 
 ## AI Usage Disclaimer
 More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

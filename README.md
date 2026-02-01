@@ -41,6 +41,7 @@ sudo perf record -F 99 -a -g -- sleep 5
 sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
 
 # Plot them in the TUI!!
+# NOTE: this records the number of cycles rather than the hit count, but the app still works
 zig-out/bin/flametui --file out.collapsed
 ```
 

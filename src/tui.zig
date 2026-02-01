@@ -265,7 +265,8 @@ pub const Interface = struct {
     infoSliceSharedObjectName: ?[]u8 = null,
 
     // Selected node id
-    selectedNode: SymbolTrie.NodeId,
+    selectedNodeId: SymbolTrie.NodeId,
+
 
     // Owns an allocator, arguably better if unmanaged
     // TODO: make interface unmanaged
@@ -284,7 +285,7 @@ pub const Interface = struct {
             .symbols = null,
 
             // We start plotting the root node
-            .selectedNode = SymbolTrie.RootId,
+            .selectedNodeId = SymbolTrie.RootId,
         };
     }
 
@@ -421,10 +422,10 @@ pub const Interface = struct {
         try vx.queryColor(tty.writer(), .{ .index = 4 });
 
         // Main loop
-        var mouse: ?vaxis.Mouse = null;
         tui_loop: while (true) {
             var event = loop.nextEvent();
 
+            var mouse: ?vaxis.Mouse = null;
             event_loop: while (true) {
                 // Handle events
                 switch (event) {
@@ -462,7 +463,7 @@ pub const Interface = struct {
                         }
 
                         if (key.matches(vaxis.Key.escape, .{})) {
-                            self.selectedNode = SymbolTrie.RootId;
+                            self.selectedNodeId = SymbolTrie.RootId;
                         }
                     },
                     // Our resize logic
@@ -482,9 +483,10 @@ pub const Interface = struct {
                 }
             }
 
-            var timer = try std.time.Timer.start();
+            // var timer = try std.time.Timer.start();
             {
                 self.infoSliceHitCount = null;
+                self.infoSliceHitCountPercentages = null;
                 self.infoSliceSymbol = null;
                 self.infoSliceSharedObjectName = null;
 
@@ -493,8 +495,8 @@ pub const Interface = struct {
                 try vx.render(tty.writer());
             }
 
-            const elapsed_ns = timer.read();
-            std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
+            // const elapsed_ns = timer.read();
+            // std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
     }
 
@@ -622,7 +624,7 @@ pub const Interface = struct {
             const flamegraphH = canvas.flamegraphWindowEndInsideY - canvas.flamegraphWindowBegInsideY + 1;
 
             // Draw recursively, first node is the root node
-            try self.drawSymbol(self.selectedNode, win, mouse, .{
+            try self.drawSymbol(self.selectedNodeId, win, mouse, .{
                 // We want to draw 100% of the availible space
                 .widthNormalized = 1.0,
 
@@ -704,25 +706,28 @@ pub const Interface = struct {
 
                 switch (entry.payload) {
                     .kernel => |payload| {
-                        const prefix = "[kern] symbol: ";
+                        const prefix = "[kern] symbol:  ";
                         const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
                         const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
                         self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
                     },
                     .root => |payload| {
-                        const prefix = "[root] symbol: ";
+                        const prefix = "[root] symbol:  ";
                         const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
                         const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
                         self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
                     },
                     .user => |payload| {
-                        const prefix = "[user] symbol: ";
+                        const prefix = "[user] symbol:  ";
                         const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
                         const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
                         self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
 
                         const prefixDll = "object:         ";
-                        const max_len_dll = if (self.infoBufSharedObjectName.len > prefixDll.len) self.infoBufSharedObjectName.len - prefixDll.len else 0;
+                        const max_len_dll = if (self.infoBufSharedObjectName.len > prefixDll.len)
+                            self.infoBufSharedObjectName.len - prefixDll.len
+                        else
+                            0;
                         const dll = if (payload.dll.len > max_len_dll) payload.dll[0..max_len_dll] else payload.dll;
                         self.infoSliceSharedObjectName = try std.fmt.bufPrint(&self.infoBufSharedObjectName, "{s}{s}", .{ prefixDll, dll });
                     },
@@ -730,8 +735,8 @@ pub const Interface = struct {
 
                 style.bg = dimColor(style.bg, 0.7);
 
-                if (m.button == vaxis.Mouse.Button.left and m.type == vaxis.Mouse.Type.release) {
-                    self.selectedNode = entryId;
+                if (m.button == vaxis.Mouse.Button.left and m.type == vaxis.Mouse.Type.press) {
+                    self.selectedNodeId = entryId;
                 }
             }
         }

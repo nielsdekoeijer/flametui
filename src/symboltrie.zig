@@ -9,7 +9,7 @@ const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 extern "c" fn __cxa_demangle(
     mangled_name: [*c]const u8,
     output_buffer: [*c]u8,
-    length: [*c]usize,       // <-- CHANGE THIS to [*c]usize
+    length: [*c]usize, // <-- CHANGE THIS to [*c]usize
     status: *c_int,
 ) [*c]u8;
 
@@ -130,6 +130,98 @@ pub const SymbolTrie = struct {
         return std.hash.Wyhash.hash(0, str);
     }
 
+    // For loading a collapsed stacktrace file
+    pub fn loadCollapsed(self: *SymbolTrie, reader: *std.Io.Reader) !void {
+        // GIGA JANK we gotta find a better way 
+        if (self.nodes.items.len == 0) {
+            try self.nodes.append(self.allocator, TrieNode{
+                .hitCount = 1,
+                .parent = RootId,
+                .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
+                .payload = .{ 
+                    .root = .{ .symbol = try self.allocator.dupe(u8, "root") } 
+                },
+            });
+
+            const rootKey = Key{ .parent = RootId, .symbolHash = hashSymbol("root") };
+            try self.nodesLookup.put(self.allocator, rootKey, RootId);
+        }
+
+        while (true) {
+            // Take line by line
+            const line = reader.takeDelimiterExclusive('\n') catch break;
+            std.log.info("Adding line '{s}'...", .{line});
+
+            // Remove unexpected characters
+            const trimmed = std.mem.trim(u8, line, "\r\t ");
+            if (trimmed.len == 0) {
+                continue;
+            }
+
+            // Extract the count
+            const count = blk: {
+                var spaceIter = std.mem.tokenizeAny(u8, trimmed, " ");
+
+                var countStr: []const u8 = undefined;
+                while(spaceIter.next()) |str| {
+                    countStr = str;
+                }
+
+                break :blk std.fmt.parseInt(u64, countStr, 10) catch return error.CollapsedParseFailure;
+            };
+
+            // Increment root
+            self.nodes.items[RootId].hitCount += count;
+
+            // Get all the entries
+            var colonIter = std.mem.tokenizeAny(u8, trimmed, ";");
+            var parentId = RootId;
+
+            // For now, we just treat everything as though its a user
+            while (colonIter.next()) |symbol| {
+                const key = Key{
+                    .parent = parentId,
+                    .symbolHash = hashSymbol(symbol),
+                };
+
+                const found = self.nodesLookup.get(key);
+                if (found) |symbolId| {
+                    // Hit! Add the total hitcount
+                    self.nodes.items[symbolId].hitCount += count;
+                    parentId = symbolId;
+                } else {
+                    // Miss! Create the node and append
+                    try self.nodes.append(self.allocator, TrieNode{
+                        // Add the stack items hit ount
+                        .hitCount = count,
+                        .parent = parentId,
+                        .payload = .{
+                            .user = .{
+                                // take the symbol, takes ownership!
+                                .symbol = try tryDemangle(self.allocator, symbol),
+                                // clone the dll for debug later
+                                .dll = try self.allocator.dupe(u8, "<Imported from Collapsed>"),
+                            },
+                        },
+                        .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
+                    });
+
+                    // Compute the new node id
+                    const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+                    try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                    // Go to parent, and add self as child
+                    if (nodeId != parentId) {
+                        try self.nodes.items[parentId].children.append(self.allocator, nodeId);
+                    }
+
+                    // Update, new parent
+                    parentId = nodeId;
+                }
+            }
+        }
+    }
+
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
     pub fn add(self: *SymbolTrie, stacks: StackTrie) !void {
         // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie. Why
@@ -234,7 +326,7 @@ pub const SymbolTrie = struct {
     pub fn free(self: *SymbolTrie) void {
         for (self.nodes.items) |node| {
             switch (node.payload) {
-                .kernel => |s| self.allocator.free(s.symbol),
+                .kernel, .root => |s| self.allocator.free(s.symbol),
                 .user => |s| {
                     self.allocator.free(s.symbol);
                     self.allocator.free(s.dll);

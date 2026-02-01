@@ -13,6 +13,7 @@ const Config = struct {
             \\Options:
             \\  --hz   <int>   Sampling frequency in Hertz (default: 49)
             \\  --time <int>   Profile duration in milliseconds (default: 1000)
+            \\  --file <str>   Skip profiling, load from a collapsed stacktrace file instead
             \\  -h, --help     Print this help message
             \\
             \\
@@ -29,7 +30,6 @@ pub fn main() !void {
         }
     }
 
-
     const underlying = gpa.allocator();
     var arena = std.heap.ArenaAllocator.init(underlying);
     defer arena.deinit();
@@ -42,7 +42,18 @@ pub fn main() !void {
 
     const exe_name = args.next() orelse "flametui";
 
+    var file: ?[]const u8 = null;
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--file")) {
+            file = args.next() orelse {
+                std.log.err("Missing value for --file", .{});
+                Config.usage(exe_name);
+                std.process.exit(1);
+            };
+
+            break;
+        }
+
         if (std.mem.eql(u8, arg, "--hz")) {
             const val = args.next() orelse {
                 std.log.err("Missing value for --hz", .{});
@@ -73,7 +84,24 @@ pub fn main() !void {
         }
     }
 
-    var app = try flametui.App.init(allocator);
-    defer app.free();
-    try app.run(config.hz, config.duration_ms * std.time.ns_per_ms);
+    if (file) |f| {
+        var symboltrie = try flametui.SymbolTrie.init(allocator);
+        defer symboltrie.free();
+
+        var handle = try std.fs.cwd().openFile(f, .{});
+        defer handle.close();
+
+        var buffer: [4096]u8 = undefined;
+        var reader = handle.reader(&buffer);
+        try symboltrie.loadCollapsed(&reader.interface);
+
+        var interface = try flametui.Interface.init(allocator);
+        interface.populate(&symboltrie);
+
+        try interface.start();
+    } else {
+        var app = try flametui.App.init(allocator);
+        defer app.free();
+        try app.run(config.hz, config.duration_ms * std.time.ns_per_ms);
+    }
 }

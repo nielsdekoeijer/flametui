@@ -28,6 +28,19 @@ zig build -Doptimize=ReleaseFast
 sudo zig-out/bin/flametui --hz 49 --time 1000
 ```
 
+If you dont want to use my profiler (I must admit it is janky), you can also try doing something like:
+```bash
+# Get the tools (normally the slighly annoying part)
+git clone https://github.com/brendangregg/FlameGraph
+
+# Record + collapse stack traces
+sudo perf record -F 99 -a -g -- sleep 5
+sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
+
+# Plot them in the TUI!!
+zig-out/bin/flametui --file out.collapsed
+```
+
 *Note: Requires root privileges...!*
 
 ## Future Roadmap / Ideas
@@ -54,3 +67,7 @@ More or less all code was hand-written, but AI was used heavily in researching b
 and. Personally, I enjoy generative AI the most for doing research and learning. I think this applies especially to 
 software, as software allows for rapid hypothesis testing: even if the LLM barfs some nonesense, you can easily fact
 check it in many cases. This is less true in other disciplines. 
+
+I also commit my AI flow. It's extremely rudimentary: I have a `context.sh` script that just bangs everything in 
+an easy to copy context window. Currently, the whole project fits in a context window. This makes for easy prompting
+(for now...).

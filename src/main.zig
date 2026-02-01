@@ -45,12 +45,13 @@ const Config = struct {
 };
 
 pub fn main() !void {
-    const memory_size = 256 * 1024 * 1024; 
-    const backing_buffer = try std.heap.page_allocator.alloc(u8, memory_size);
-    defer std.heap.page_allocator.free(backing_buffer);
+    // const memory_size = 256 * 1024 * 1024; 
+    // const backing_buffer = try std.heap.page_allocator.alloc(u8, memory_size);
+    // defer std.heap.page_allocator.free(backing_buffer);
+    // var fba = std.heap.FixedBufferAllocator.init(backing_buffer);
+    // const underlying = fba.allocator();
 
-    var fba = std.heap.FixedBufferAllocator.init(backing_buffer);
-    const underlying = fba.allocator();
+    const underlying = std.heap.c_allocator;
 
     var arena = std.heap.ArenaAllocator.init(underlying);
     defer arena.deinit();

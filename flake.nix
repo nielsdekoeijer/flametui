@@ -17,9 +17,12 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.zig-overlay.follows = "zig-flake";
     };
+
+    # for packaging
+    zig2nix.url = "github:Cloudef/zig2nix";
   };
 
-  outputs = { self, nixpkgs, utils, zig-flake, zls-flake }:
+  outputs = { self, nixpkgs, utils, zig-flake, zls-flake, zig2nix }:
     utils.lib.eachSystem [
       "x86_64-linux"
       "aarch64-linux"
@@ -41,27 +44,21 @@
             })
           ];
         };
-      in {
-        # on `nix build`
-        packages.default = pkgs.stdenv.mkDerivation {
-          pname = "flametui";
-          version = "0.0.1-alpha";
-          src = ./.;
 
-          nativeBuildInputs = [ pkgs.zig ];
-
-
-          preBuild = ''
-            export ZIG_GLOBAL_CACHE_DIR=$src/.zig-cache
-          '';
-
-          buildPhase = ''
-            # Release build
-            zig build -Doptimize=ReleaseSafe --prefix $out
-          '';
-
-          dontInstall = true;
+        # TODO:  probably switch to zig2nix for everything, seems nicer
+        env = zig2nix.outputs.zig-env.${system} {
+          zig = zig2nix.outputs.packages.${system}.zig-0_15_2;
         };
+      in {
+
+        # on `nix build`
+        # TODO: do this, vendoring the dependenices is still a pain
+        # packages.default = env.package {
+        #   src = ./.;
+        #   nativeBuildInputs = [ pkgs.zig ];
+        #   # zigPreferMusl = false; 
+        #   # zigDisableWrap = false;
+        # };
 
         # on `nix develop`
         devShells.default = pkgs.mkShell {

@@ -17,11 +17,6 @@ It looks cool though!
 I hope to keep the motivation to keep pushing it forward, trying to be somewhat neat in the versioning.
 Currently, it is in a dodgy state, so we are still in **ALPHA**. 
 
-## Easy Install
-If you have nix, you're living the dream as you can just:
-```bash
-```
-
 ## Usage
 
 As `vaxis` pins `0.15.1`, this is the required version. Note that we supply a flake.nix such that you can use my 

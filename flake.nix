@@ -1,5 +1,5 @@
 {
-  description = "YOUR DESCRIPTION HERE";
+  description = "flametui: flamegraphs in the tui";
 
   inputs = {
     # grab nixpkgs, I use unstable!
@@ -23,8 +23,6 @@
     utils.lib.eachSystem [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
-      "aarch64-darwin"
     ] (system:
       let
 
@@ -44,6 +42,23 @@
           ];
         };
       in {
+        # on `nix build`
+        packages.default = pkgs.stdenv.mkDerivation {
+          pname = "flametui";
+          version = "0.0.1-alpha";
+          src = ./.;
+
+          nativeBuildInputs = [ pkgs.zig ];
+
+          buildPhase = ''
+            # Release build
+            zig build -Doptimize=ReleaseSafe --prefix $out
+          '';
+
+          # disable install phase because zig build --prefix handles it
+          dontInstall = true;
+        };
+
         # on `nix develop`
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.zig pkgs.zls ];

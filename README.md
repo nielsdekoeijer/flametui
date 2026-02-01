@@ -14,6 +14,14 @@ As a general disclaimer, this project is / was a huge learning experience for me
 This project has been insufficiently scrutenized to take its outputs as serious and correct. 
 It looks cool though!
 
+I hope to keep the motivation to keep pushing it forward, trying to be somewhat neat in the versioning.
+Currently, it is in a dodgy state, so we are still in **ALPHA**. 
+
+## Easy Install
+If you have nix, you're living the dream as you can just:
+```bash
+```
+
 ## Usage
 
 As `vaxis` pins `0.15.1`, this is the required version. Note that we supply a flake.nix such that you can use my 
@@ -41,6 +49,8 @@ sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
 zig-out/bin/flametui --file out.collapsed
 ```
 
+Note that you can **click on the nodes** to expand the view! You can unzoom back by hitting escape.
+
 *Note: Requires root privileges...!*
 
 ## Future Roadmap / Ideas
@@ -55,19 +65,15 @@ There are several areas where this project could be improved:
         Further visualization options: real-time moving-average flamegraphs, etc.  
 - [ ] **Navigation**: Adding scrolling and zooming capabilities to handle larger traces.
 - [ ] **Better UX**: Improving the overall responsiveness and interactivity. Currently, my vaxis impl. is giga janky.
-- [ ] **Read Existing Formats**: The handcrafted profiler is weak, and it will likely be lapped by competitors. Thus, 
-        I want to support the folded stack format so my program can also be used as a flamegrah viewer for more 
-        sophisticated tools.
 - [ ] **Write Existing Formats**: If for some arcane reason someone wants to serialize their measurement, we should
-        Allow that.
+        Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
 - [ ] **Help Menu**: To see what the keybindings are. Not important currently, cause I dont have keybindings.
 
 ## AI Usage Disclaimer
-More or less all code was hand-written, but AI was used heavily in researching both e-BPF, how to create flamegraphs,
-and. Personally, I enjoy generative AI the most for doing research and learning. I think this applies especially to 
-software, as software allows for rapid hypothesis testing: even if the LLM barfs some nonesense, you can easily fact
-check it in many cases. This is less true in other disciplines. 
+More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
+and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 
+I think this applies especially to software, as software allows for rapid hypothesis testing: even if the LLM barfs 
+some nonesense, you can easily fact check it in many cases. This is less true in other disciplines. 
 
-I also commit my AI flow. It's extremely rudimentary: I have a `context.sh` script that just bangs everything in 
-an easy to copy context window. Currently, the whole project fits in a context window. This makes for easy prompting
-(for now...).
+I also commit my AI flow. It's extremely brutalist: I have a `context.sh` script that just bangs everything in 
+an easy to copy format. Currently, the whole project fits in a context window. This makes for easy prompting.

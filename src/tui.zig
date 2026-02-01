@@ -53,8 +53,8 @@ const Canvas = struct {
     const FlamegraphHEndBoundary = 1;
 
     // The offset from edges (i.e. 0, width - 1)
-    const FlamegraphWBegInside = FlamegraphWBegBoundary + 1;
-    const FlamegraphWEndInside = FlamegraphWEndBoundary + 1;
+    const FlamegraphWBegInside = FlamegraphWBegBoundary + 2;
+    const FlamegraphWEndInside = FlamegraphWEndBoundary + 2;
 
     // The offset from edges (i.e. 0 and divider)
     const FlamegraphHBegInside = FlamegraphHBegBoundary + 1;
@@ -169,6 +169,78 @@ fn dimColor(color: vaxis.Color, t: f32) vaxis.Color {
     }
 }
 
+/// Helper to draw border how I like it
+fn drawBorder(title: []const u8, window: vaxis.Window, x1: u16, y1: u16, x2: u16, y2: u16, color: vaxis.Color) void {
+    const style = vaxis.Style{
+        .fg = color,
+        .bold = true,
+    };
+
+    // Corners
+    window.writeCell(x1, y1, .{
+        .char = .{ .grapheme = "╔" },
+        .style = style,
+    });
+    window.writeCell(x2, y1, .{
+        .char = .{ .grapheme = "╗" },
+        .style = style,
+    });
+
+    // Verticals
+    for ((y1 + 1)..y2) |y| {
+        window.writeCell(x1, @intCast(y), .{
+            .char = .{ .grapheme = "║" },
+            .style = style,
+        });
+        window.writeCell(x2, @intCast(y), .{
+            .char = .{ .grapheme = "║" },
+            .style = style,
+        });
+    }
+
+    // Corners
+    window.writeCell(x1, y2, .{
+        .char = .{ .grapheme = "╚" },
+        .style = style,
+    });
+    window.writeCell(x2, y2, .{
+        .char = .{ .grapheme = "╝" },
+        .style = style,
+    });
+
+    // Horitontal
+    for ((x1 + 1)..x2) |x| {
+        window.writeCell(@intCast(x), y1, .{
+            .char = .{ .grapheme = "═" },
+            .style = style,
+        });
+        window.writeCell(@intCast(x), y2, .{
+            .char = .{ .grapheme = "═" },
+            .style = style,
+        });
+    }
+
+    // Print
+    _ = vaxis.Window.printSegment(window, vaxis.Cell.Segment{ .text = title, .style = style, .link = .{} }, .{
+        .col_offset = x1 + 2,
+        .row_offset = y1,
+        .commit = true,
+        .wrap = .none,
+    });
+}
+
+/// Helper to draw over an existing node, keeping its background style
+fn drawCellOverBackground(win: vaxis.Window, x: u16, y: u16, char: []const u8, style: vaxis.Style) void {
+    if (win.readCell(x, y)) |bg_cell| {
+        var s = style;
+        s.bg = bg_cell.style.bg;
+        win.writeCell(x, y, .{
+            .char = .{ .grapheme = char },
+            .style = s,
+        });
+    }
+}
+
 /// Object managing plotting and events
 pub const Interface = struct {
     textColor: vaxis.Color = .{ .index = 15 },
@@ -177,16 +249,23 @@ pub const Interface = struct {
     userColor: vaxis.Color = .{ .index = 4 },
 
     // Pre-reseve a buffer and a slice to the hit count we optionally print on screen
-    infoBufHitCount: [512]u8 = std.mem.zeroes([512]u8),
+    infoBufHitCount: [4096]u8 = std.mem.zeroes([4096]u8),
     infoSliceHitCount: ?[]u8 = null,
 
+    // Pre-reseve a buffer and a slice to the percentages we optionally print on screen
+    infoBufHitCountPercentages: [4096]u8 = std.mem.zeroes([4096]u8),
+    infoSliceHitCountPercentages: ?[]u8 = null,
+
     // Pre-reseve a buffer and a slice to the symbol name we optionally print on screen
-    infoBufSymbol: [512]u8 = std.mem.zeroes([512]u8),
+    infoBufSymbol: [4096]u8 = std.mem.zeroes([4096]u8),
     infoSliceSymbol: ?[]u8 = null,
 
     // Pre-reseve a buffer and a slice to the shared object name we optionally print on screen
-    infoBufSharedObjectName: [512]u8 = std.mem.zeroes([512]u8),
+    infoBufSharedObjectName: [4096]u8 = std.mem.zeroes([4096]u8),
     infoSliceSharedObjectName: ?[]u8 = null,
+
+    // Selected node id
+    selectedNode: SymbolTrie.NodeId,
 
     // Owns an allocator, arguably better if unmanaged
     // TODO: make interface unmanaged
@@ -203,6 +282,9 @@ pub const Interface = struct {
         return Interface{
             .allocator = allocator,
             .symbols = null,
+
+            // We start plotting the root node
+            .selectedNode = SymbolTrie.RootId,
         };
     }
 
@@ -378,6 +460,10 @@ pub const Interface = struct {
                         if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                             break :tui_loop;
                         }
+
+                        if (key.matches(vaxis.Key.escape, .{})) {
+                            self.selectedNode = SymbolTrie.RootId;
+                        }
                     },
                     // Our resize logic
                     .winsize => |winsize| {
@@ -431,97 +517,85 @@ pub const Interface = struct {
     const InfoBorderHEnd = 1;
 
     // Draw a border
-    fn drawBorder(self: Interface, title: []const u8, window: vaxis.Window, x1: u16, y1: u16, x2: u16, y2: u16, color: vaxis.Color) void {
-        const style = vaxis.Style{
-            .fg = color,
-            .bold = true,
-        };
-
-        // Corners
-        window.writeCell(x1, y1, .{
-            .char = .{ .grapheme = "╔" },
-            .style = style,
-        });
-        window.writeCell(x2, y1, .{
-            .char = .{ .grapheme = "╗" },
-            .style = style,
-        });
-
-        // Verticals
-        for ((y1 + 1)..y2) |y| {
-            self.drawCellOverBackground(window, x1, @intCast(y), "║", style);
-            self.drawCellOverBackground(window, x2, @intCast(y), "║", style);
-        }
-
-        // Corners
-        window.writeCell(x1, y2, .{
-            .char = .{ .grapheme = "╚" },
-            .style = style,
-        });
-        window.writeCell(x2, y2, .{
-            .char = .{ .grapheme = "╝" },
-            .style = style,
-        });
-
-        // Horitontal
-        for ((x1 + 1)..x2) |x| {
-            self.drawCellOverBackground(window, @intCast(x), y1, "═", style);
-            self.drawCellOverBackground(window, @intCast(x), y2, "═", style);
-        }
-
-        // Print
-        _ = vaxis.Window.printSegment(window, vaxis.Cell.Segment{ .text = title, .style = style, .link = .{} }, .{
-            .col_offset = x1 + 2,
-            .row_offset = y1,
-            .commit = true,
-            .wrap = .none,
-        });
-    }
-
-    fn drawInfo(self: Interface, window: vaxis.Window) void {
+    fn drawInfo(self: Interface, window: vaxis.Window, canvas: Canvas) void {
         if (self.infoSliceHitCount) |slice| {
-            for (0..slice.len) |i| {
-                self.drawCellOverBackground(
-                    window,
-                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
-                    window.height - FlamegraphBorderHEnd + 3,
-                    (&slice[i])[0..1],
-                    .{
+            _ = vaxis.Window.printSegment(
+                window,
+                vaxis.Cell.Segment{
+                    .text = slice,
+                    .style = .{
                         .fg = self.textColor,
                         .bold = true,
                     },
-                );
-            }
+                    .link = .{},
+                },
+                .{
+                    .col_offset = canvas.infoWindowBegInsideX,
+                    .row_offset = canvas.infoWindowBegInsideY,
+                    .commit = true,
+                    .wrap = .none,
+                },
+            );
+        }
+
+        if (self.infoSliceHitCountPercentages) |slice| {
+            _ = vaxis.Window.printSegment(
+                window,
+                vaxis.Cell.Segment{
+                    .text = slice,
+                    .style = .{
+                        .fg = self.textColor,
+                        .bold = true,
+                    },
+                    .link = .{},
+                },
+                .{
+                    .col_offset = canvas.infoWindowBegInsideX,
+                    .row_offset = canvas.infoWindowBegInsideY + 1,
+                    .commit = true,
+                    .wrap = .none,
+                },
+            );
         }
 
         if (self.infoSliceSymbol) |slice| {
-            for (0..slice.len) |i| {
-                self.drawCellOverBackground(
-                    window,
-                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
-                    window.height - FlamegraphBorderHEnd + 4,
-                    (&slice[i])[0..1],
-                    .{
+            _ = vaxis.Window.printSegment(
+                window,
+                vaxis.Cell.Segment{
+                    .text = slice,
+                    .style = .{
                         .fg = self.textColor,
                         .bold = true,
                     },
-                );
-            }
+                    .link = .{},
+                },
+                .{
+                    .col_offset = canvas.infoWindowBegInsideX,
+                    .row_offset = canvas.infoWindowBegInsideY + 2,
+                    .commit = true,
+                    .wrap = .none,
+                },
+            );
         }
 
         if (self.infoSliceSharedObjectName) |slice| {
-            for (0..slice.len) |i| {
-                self.drawCellOverBackground(
-                    window,
-                    FlamegraphBorderWBegBoundary + @as(u16, @intCast(i)),
-                    window.height - FlamegraphBorderHEnd + 5,
-                    (&slice[i])[0..1],
-                    .{
+            _ = vaxis.Window.printSegment(
+                window,
+                vaxis.Cell.Segment{
+                    .text = slice,
+                    .style = .{
                         .fg = self.textColor,
                         .bold = true,
                     },
-                );
-            }
+                    .link = .{},
+                },
+                .{
+                    .col_offset = canvas.infoWindowBegInsideX,
+                    .row_offset = canvas.infoWindowBegInsideY + 3,
+                    .commit = true,
+                    .wrap = .none,
+                },
+            );
         }
     }
 
@@ -534,21 +608,21 @@ pub const Interface = struct {
         const canvas = Canvas.init(win) catch return;
 
         // Draw the flamegraph box
-        self.drawBorder("FlameGraph", win, canvas.flamegraphWindowBegBoundaryX, canvas.flamegraphWindowBegBoundaryY, //
+        drawBorder("FlameGraph", win, canvas.flamegraphWindowBegBoundaryX, canvas.flamegraphWindowBegBoundaryY, //
             canvas.flamegraphWindowEndBoundaryX, canvas.flamegraphWindowEndBoundaryY, self.textColor);
 
         // Draw the info box
-        self.drawBorder("NodeInfo", win, canvas.infoWindowBegBoundaryX, canvas.infoWindowBegBoundaryY, //
+        drawBorder("NodeInfo", win, canvas.infoWindowBegBoundaryX, canvas.infoWindowBegBoundaryY, //
             canvas.infoWindowEndBoundaryX, canvas.infoWindowEndBoundaryY, self.textColor);
 
         // We may not have any symbols loaded, in which case return
-        if (self.symbols) |symbols| {
+        if (self.symbols) |_| {
             // Internal size exclusive of the border
-            const flamegraphW = canvas.flamegraphWindowEndInsideX - canvas.flamegraphWindowBegInsideX + 1; 
-            const flamegraphH = canvas.flamegraphWindowEndInsideY - canvas.flamegraphWindowBegInsideY + 1; 
+            const flamegraphW = canvas.flamegraphWindowEndInsideX - canvas.flamegraphWindowBegInsideX + 1;
+            const flamegraphH = canvas.flamegraphWindowEndInsideY - canvas.flamegraphWindowBegInsideY + 1;
 
             // Draw recursively, first node is the root node
-            try self.drawSymbol(symbols.nodes.items[0], win, mouse, .{
+            try self.drawSymbol(self.selectedNode, win, mouse, .{
                 // We want to draw 100% of the availible space
                 .widthNormalized = 1.0,
 
@@ -568,7 +642,7 @@ pub const Interface = struct {
                 .currentY = canvas.flamegraphWindowEndInsideY,
             });
 
-            self.drawInfo(win);
+            self.drawInfo(win, canvas);
         } else {
             return;
         }
@@ -576,7 +650,7 @@ pub const Interface = struct {
 
     fn drawSymbol(
         self: *Interface,
-        entry: SymbolTrie.TrieNode,
+        entryId: SymbolTrie.NodeId,
         win: vaxis.Window,
         mouse: ?vaxis.Mouse,
         context: struct {
@@ -588,10 +662,25 @@ pub const Interface = struct {
             currentY: u16,
         },
     ) !void {
+        // Get out entry
+        const entry = self.symbols.?.nodes.items[entryId];
+
         // How we get the symbol name, works for all enums
         const symbol = blk: switch (entry.payload) {
             inline else => |s| break :blk s.symbol,
         };
+
+        // The Y coordinate is fixed and given by the arguments. We have to calculate the X coordinate though.
+        const begX: u16 = @intFromFloat((context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
+            @as(f32, @floatFromInt(context.currentX)));
+        const endX: u16 = @intFromFloat((context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
+            @as(f32, @floatFromInt(context.currentX)));
+        const len = endX - begX;
+
+        // If we have no cell to draw, no sense going any deeper
+        if (len == 0) {
+            return;
+        }
 
         // How we draw the bar
         var style = vaxis.Style{
@@ -600,36 +689,50 @@ pub const Interface = struct {
             .bold = true,
         };
 
-        // The Y coordinate is fixed and given by the arguments. We have to calculate the X coordinate though.
-        const rawBegX = (context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
-            @as(f32, @floatFromInt(context.currentX));
-        const rawEndX = (context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
-            @as(f32, @floatFromInt(context.currentX));
-
-        const begX: u16 = @intFromFloat(rawBegX);
-        const endX: u16 = @intFromFloat(rawEndX);
-        const len = endX - begX;
-
-        // If we have no cell to draw, no sense going any deeper
-        if (len == 0) return;
         if (mouse) |m| {
             if ((begX <= m.col and m.col < endX) and m.row == context.currentY) {
+                self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:      {}", .{entry.hitCount});
+                const rootHitCount = self.symbols.?.nodes.items[SymbolTrie.RootId].hitCount;
+                const rootHitCountPercentage = @as(f32, @floatFromInt(entry.hitCount)) / @as(f32, @floatFromInt(rootHitCount)) * 100.0;
+                const parentHitCount = self.symbols.?.nodes.items[entry.parent].hitCount;
+                const parentHitCountPercentage = @as(f32, @floatFromInt(entry.hitCount)) / @as(f32, @floatFromInt(parentHitCount)) * 100.0;
+                self.infoSliceHitCountPercentages = try std.fmt.bufPrint(
+                    &self.infoBufHitCountPercentages,
+                    "percentage:     parent: {d:3.2}%  root: {d:3.2}%",
+                    .{ parentHitCountPercentage, rootHitCountPercentage },
+                );
+
                 switch (entry.payload) {
                     .kernel => |payload| {
-                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
-                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[user] symbol: {s}", .{payload.symbol});
+                        const prefix = "[kern] symbol: ";
+                        const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                        const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
                     },
                     .root => |payload| {
-                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
-                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[root] symbol: {s}", .{payload.symbol});
+                        const prefix = "[root] symbol: ";
+                        const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                        const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
                     },
                     .user => |payload| {
-                        self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:     {}", .{entry.hitCount});
-                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "[kern] symbol: {s}", .{payload.symbol});
-                        self.infoSliceSharedObjectName = try std.fmt.bufPrint(&self.infoBufSharedObjectName, "object:        {s}", .{payload.dll});
+                        const prefix = "[user] symbol: ";
+                        const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                        const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                        self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
+
+                        const prefixDll = "object:         ";
+                        const max_len_dll = if (self.infoBufSharedObjectName.len > prefixDll.len) self.infoBufSharedObjectName.len - prefixDll.len else 0;
+                        const dll = if (payload.dll.len > max_len_dll) payload.dll[0..max_len_dll] else payload.dll;
+                        self.infoSliceSharedObjectName = try std.fmt.bufPrint(&self.infoBufSharedObjectName, "{s}{s}", .{ prefixDll, dll });
                     },
                 }
+
                 style.bg = dimColor(style.bg, 0.7);
+
+                if (m.button == vaxis.Mouse.Button.left and m.type == vaxis.Mouse.Type.release) {
+                    self.selectedNode = entryId;
+                }
             }
         }
 
@@ -653,24 +756,19 @@ pub const Interface = struct {
             },
         }
 
-        if (context.currentY == 0) {
+        // catch integer underflow
+        if (context.currentY == 0 or context.currentY - 1 < FlamegraphBorderHBeg) {
             return;
         }
 
         var childOffset: f32 = context.offsetNormalized;
         for (entry.children.items) |id| {
-            // safe to do
+
+            // Safe to dereferences as we checked it before
             const child = self.symbols.?.nodes.items[id];
-
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
-            std.debug.assert(childWidth <= 1.1);
 
-            // stop drawing if we leave the screen
-            if (context.currentY - 1 < FlamegraphBorderHBeg) {
-                return;
-            }
-
-            try self.drawSymbol(child, win, mouse, .{
+            try self.drawSymbol(id, win, mouse, .{
                 .currentX = context.currentX,
                 .currentY = context.currentY - 1,
                 .widthCells = context.widthCells,
@@ -680,19 +778,6 @@ pub const Interface = struct {
             });
 
             childOffset += childWidth;
-        }
-    }
-
-    // Helper to draw over an existing node, keeping its background style
-    fn drawCellOverBackground(self: Interface, win: vaxis.Window, x: u16, y: u16, char: []const u8, style: vaxis.Style) void {
-        _ = self;
-        if (win.readCell(x, y)) |bg_cell| {
-            var s = style;
-            s.bg = bg_cell.style.bg;
-            win.writeCell(x, y, .{
-                .char = .{ .grapheme = char },
-                .style = s,
-            });
         }
     }
 };

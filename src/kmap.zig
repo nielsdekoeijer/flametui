@@ -32,7 +32,7 @@ pub const KMapUnmanaged = struct {
         defer file.close();
 
         // Read the file
-        var buf: [4096]u8 = undefined;
+        var buf: [64 * 1024]u8 = undefined;
         var reader = file.reader(&buf);
 
         // Populate + sort

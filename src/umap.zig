@@ -86,13 +86,16 @@ pub const UMapUnmanaged = struct {
         };
         defer file.close();
 
+        // Read the whole file in 1 go
+        const content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch return UnmappedInstance;
+        defer allocator.free(content);
+
         // Reader for said file contents
-        var fileBuffer: [4096]u8 = undefined;
-        var fileReader = file.reader(&fileBuffer);
+        var fbs = std.Io.Reader.fixed(content);
 
         // Populate internals + sort based on instruction pointer enabling binary search. Because we rather show
         // the user something rather than nothing, for now return an unmapped instance.
-        populate(allocator, &backend, &fileReader.interface) catch return UnmappedInstance;
+        populate(allocator, &backend, &fbs) catch return UnmappedInstance;
         sort(&backend);
 
         return UMapUnmanaged{
@@ -142,7 +145,7 @@ pub const UMapUnmanaged = struct {
     }
 
     // populates the map from e.g. a file
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(UMapEntry), reader: *std.Io.Reader) !void {
+    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(UMapEntry), reader: anytype) !void {
         // Loop over file contents
         while (true) {
             // Read until we cannot take more lines --> implies EOF

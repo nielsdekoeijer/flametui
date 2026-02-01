@@ -112,13 +112,20 @@ pub const App = struct {
 
         // Run
         var timer = try std.time.Timer.start();
+        // while (timer.read() < nanoseconds) {
+        //     try self.ring.poll(1);
+        //     std.atomic.spinLoopHint();
+        // }
+        //
         while (timer.read() < nanoseconds) {
-            try self.ring.poll(1);
-            std.atomic.spinLoopHint();
+            const count = try self.ring.consume();
+
+            if (count == 0) {
+                try self.ring.poll(10); 
+            }
         }
 
         var symboltrie = try SymbolTrie.init(self.allocator);
-        try symboltrie.add(self.iptrie.*);
         try symboltrie.add(self.iptrie.*);
 
         // Report how many we missed, reset it

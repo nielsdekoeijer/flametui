@@ -70,6 +70,9 @@ pub const SharedObjectMap = struct {
         );
         errdefer std.posix.munmap(mappedSharedObject);
 
+        // Prefault 
+        try std.posix.madvise(mappedSharedObject.ptr, mappedSharedObject.len, std.posix.MADV.SEQUENTIAL);
+
         // Create a reader
         populate(allocator, mappedSharedObject, &symbols) catch {
             // its possible for this to fail, I'm not quite sure why that happens

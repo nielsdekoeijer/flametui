@@ -32,7 +32,8 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   __u32 key;
 
   // get pid
-  __u64 pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+  // __u64 pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+  __u64 pid = bpf_get_current_pid_tgid() >> 32;
   if (pid == 0) {
       // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
       return 0;

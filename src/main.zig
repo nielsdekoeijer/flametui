@@ -22,7 +22,16 @@ const Config = struct {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) {
+            std.testing.expect(false) catch @panic("TEST FAIL");
+        }
+    }
+
+
+    const underlying = gpa.allocator();
+    var arena = std.heap.ArenaAllocator.init(underlying);
     defer arena.deinit();
     const allocator = arena.allocator();
 

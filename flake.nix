@@ -50,12 +50,16 @@
 
           nativeBuildInputs = [ pkgs.zig ];
 
+
+          preBuild = ''
+            export ZIG_GLOBAL_CACHE_DIR=$src/.zig-cache
+          '';
+
           buildPhase = ''
             # Release build
             zig build -Doptimize=ReleaseSafe --prefix $out
           '';
 
-          # disable install phase because zig build --prefix handles it
           dontInstall = true;
         };
 

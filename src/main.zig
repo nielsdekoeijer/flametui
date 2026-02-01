@@ -31,7 +31,7 @@ const Config = struct {
             \\
             \\Options (record):
             \\  --hz <int>   Sampling frequency in Hertz (default: 49)
-            \\  -ms <int>    Profile duration in milliseconds (default: 1000)
+            \\  --ms <int>   Profile duration in milliseconds (default: 1000)
             \\
             \\General:
             \\  --verbose    Enable verbose logging
@@ -77,30 +77,30 @@ pub fn main() !void {
                 verbose = true;
             } else if (std.mem.eql(u8, arg, "--hz")) {
                 const val = args.next() orelse {
-                    try stderrWriter.interface.print("Missing value for --hz", .{});
+                    try stderrWriter.interface.print("Missing value for --hz\n", .{});
                     try Config.usage(exe_name, &stderrWriter.interface);
                     try stderrWriter.interface.flush();
                     std.process.exit(1);
                 };
                 config.hz = std.fmt.parseInt(usize, val, 10) catch |err| {
-                    try stderrWriter.interface.print("Invalid number for --hz: {s} ({})", .{ val, err });
+                    try stderrWriter.interface.print("Invalid number for --hz: {s} ({})\n", .{ val, err });
                     try stderrWriter.interface.flush();
                     std.process.exit(1);
                 };
-            } else if (std.mem.eql(u8, arg, "-ms")) {
+            } else if (std.mem.eql(u8, arg, "--ms")) {
                 const val = args.next() orelse {
-                    try stderrWriter.interface.print("Missing value for -ms", .{});
+                    try stderrWriter.interface.print("Missing value for --ms\n", .{});
                     try Config.usage(exe_name, &stderrWriter.interface);
                     try stderrWriter.interface.flush();
                     std.process.exit(1);
                 };
                 config.duration_ms = std.fmt.parseInt(u64, val, 10) catch |err| {
-                    try stderrWriter.interface.print("Invalid number for -ms: {s} ({})", .{ val, err });
+                    try stderrWriter.interface.print("Invalid number for --ms: {s} ({})\n", .{ val, err });
                     try stderrWriter.interface.flush();
                     std.process.exit(1);
                 };
             } else {
-                try stderrWriter.interface.print("Unknown argument: {s}", .{arg});
+                try stderrWriter.interface.print("Unknown argument: {s}\n", .{arg});
                 try Config.usage(exe_name, &stderrWriter.interface);
                 try stderrWriter.interface.flush();
                 std.process.exit(1);

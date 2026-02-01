@@ -113,7 +113,7 @@ pub const SymbolTrie = struct {
 
     pub fn init(allocator: std.mem.Allocator) !SymbolTrie {
         return SymbolTrie{
-            .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 0),
+            .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024),
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
                 allocator,
                 &[_]Key{},
@@ -125,13 +125,20 @@ pub const SymbolTrie = struct {
         };
     }
 
-    /// Our hashing function
-    fn hashSymbol(str: []const u8) u64 {
-        return std.hash.Wyhash.hash(0, str);
-    }
-
     // For loading a collapsed stacktrace file
-    pub fn loadCollapsed(self: *SymbolTrie, reader: *std.Io.Reader) !void {
+    pub fn initCollapsed(allocator: std.mem.Allocator, reader: *std.Io.Reader) !SymbolTrie {
+        var self = SymbolTrie{
+            .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024),
+            .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
+                allocator,
+                &[_]Key{},
+                &[_]NodeId{},
+            ),
+            .allocator = allocator,
+            .kmap = try KMapUnmanaged.initEmpty(allocator),
+            .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
+        };
+
         // GIGA JANK we gotta find a better way 
         if (self.nodes.items.len == 0) {
             try self.nodes.append(self.allocator, TrieNode{
@@ -150,7 +157,6 @@ pub const SymbolTrie = struct {
         while (true) {
             // Take line by line
             const line = reader.takeDelimiterExclusive('\n') catch break;
-            std.log.info("Adding line '{s}'...", .{line});
 
             // Remove unexpected characters
             const trimmed = std.mem.trim(u8, line, "\r\t ");
@@ -220,7 +226,15 @@ pub const SymbolTrie = struct {
                 }
             }
         }
+
+        return self;
     }
+
+    /// Our hashing function
+    fn hashSymbol(str: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, str);
+    }
+
 
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
     pub fn add(self: *SymbolTrie, stacks: StackTrie) !void {

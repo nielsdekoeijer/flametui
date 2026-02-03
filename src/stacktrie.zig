@@ -79,11 +79,6 @@ pub const StackTrie = struct {
     /// first though.
     pub const Key = struct { pid: PID, parent: NodeId, ip: InstructionPointer, kind: TrieKind };
 
-    /// Caches umaps we have see. Essentially, each time we encounter a new umap we serialize it to an internal
-    /// datastructure. This is expensive, so we cache it. The key to find the umap is the pid.
-    /// TODO: processes can die, then another process can receive its pid. We don't account for this currently
-    umapCache: UMapCache,
-
     /// Contains the entries of the umaps that are in the trie. This is indexed by the UmapId. After resolving a
     /// UMapEntry from the UMapCache, we place a copy in this umaps, owning a copy of it. This is critical because
     /// our UMapCache may choose to unload a umap for a given pid if it dies.
@@ -111,7 +106,6 @@ pub const StackTrie = struct {
         });
 
         return StackTrie{
-            .umapCache = try UMapCache.init(allocator),
             .umaps = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 0),
             .nodes = nodes,
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
@@ -124,7 +118,7 @@ pub const StackTrie = struct {
     }
 
     /// Adds an event to the trie
-    pub fn add(self: *StackTrie, event: EventType) !void {
+    pub fn add(self: *StackTrie, event: EventType, umapCache: *UMapCache) !void {
         const pid = @as(PID, @intCast(event.pid));
 
         // A stack trace starts at the root.
@@ -159,7 +153,7 @@ pub const StackTrie = struct {
                 parent = @intCast(index);
             } else {
                 // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntry
-                const umap: *UMapUnmanaged = try self.umapCache.find(pid);
+                const umap: *UMapUnmanaged = try umapCache.find(pid);
                 const item: UMapEntry = switch (umap.find(ip)) {
                     // If the entry exists in the map, great, clone it
                     .found => |it| try it.clone(self.allocator),
@@ -246,7 +240,6 @@ pub const StackTrie = struct {
     }
 
     pub fn free(self: *StackTrie) void {
-        self.umapCache.deinit();
         for (self.umaps.items) |umap| umap.deinit(self.allocator);
         self.umaps.deinit(self.allocator);
         self.nodes.deinit(self.allocator);

@@ -27,12 +27,17 @@ pub const App = struct {
     links: []bpf.Object.Link,
     ring: bpf.Object.RingBufferMap,
     missed: *u64,
-    iptrie: *StackTrie,
+    context: *Context,
+
+    const Context = struct { iptrie: *StackTrie, umapCache: *UMapCache };
 
     // Invoked on polling our ebpf stack ringbuffer
-    pub fn stackRingCallback(iptrie: *StackTrie, event: *const EventTypeRaw) void {
+    pub fn stackRingCallback(context: *Context, event: *const EventTypeRaw) void {
         const parsed = EventType.init(event);
-        iptrie.add(parsed) catch @panic("failure to add to iptrie in callback");
+        context.iptrie.add(
+            parsed,
+            context.umapCache,
+        ) catch @panic("failure to add to iptrie in callback");
     }
 
     pub fn init(allocator: std.mem.Allocator) anyerror!App {
@@ -59,8 +64,21 @@ pub const App = struct {
         const iptrie = try allocator.create(StackTrie);
         iptrie.* = try StackTrie.init(allocator);
 
+        const umapCache = try allocator.create(UMapCache);
+        umapCache.* = try UMapCache.init(allocator);
+
+        const context = try allocator.create(Context);
+        context.iptrie = iptrie;
+        context.umapCache = umapCache;
+
         // create event ring buffer
-        const ring = try object.attachRingBufferMapCallback(StackTrie, EventTypeRaw, stackRingCallback, iptrie, "events");
+        const ring = try object.attachRingBufferMapCallback(
+            Context,
+            EventTypeRaw,
+            stackRingCallback,
+            context,
+            "events",
+        );
 
         // grab global counters
         const missed = try object.getGlobals(u64);
@@ -73,7 +91,7 @@ pub const App = struct {
             .links = links,
             .ring = ring,
             .missed = missed,
-            .iptrie = iptrie,
+            .context = context,
         };
     }
 
@@ -84,8 +102,11 @@ pub const App = struct {
             link.free();
         }
 
-        self.iptrie.free();
-        self.allocator.destroy(self.iptrie);
+        self.context.iptrie.free();
+        self.allocator.destroy(self.context.iptrie);
+
+        self.context.umapCache.deinit();
+        self.allocator.destroy(self.context.umapCache);
     }
 
     pub fn run(self: App, rate: usize, nanoseconds: u64) anyerror!void {
@@ -116,12 +137,12 @@ pub const App = struct {
             const count = try self.ring.consume();
 
             if (count == 0) {
-                try self.ring.poll(10); 
+                try self.ring.poll(10);
             }
         }
 
         var symboltrie = try SymbolTrie.init(self.allocator);
-        try symboltrie.add(self.iptrie.*);
+        try symboltrie.add(self.context.iptrie.*);
 
         // Report how many we missed, reset it
         self.missed.* = 0;

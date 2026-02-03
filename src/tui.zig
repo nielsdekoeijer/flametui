@@ -564,7 +564,7 @@ pub const Interface = struct {
         var depth: usize = 0;
         var curr = id;
         const nodes = self.symbols.?.nodes.items;
-        
+
         while (curr != SymbolTrie.RootId) {
             depth += 1;
             curr = nodes[curr].parent;
@@ -575,11 +575,11 @@ pub const Interface = struct {
     // Finds the immediate sibling index in the given direction
     fn getSiblingId(self: *Interface, id: SymbolTrie.NodeId, dir: enum { east, west }) ?SymbolTrie.NodeId {
         if (id == SymbolTrie.RootId) return null;
-        
+
         const nodes = self.symbols.?.nodes.items;
         const parent = nodes[nodes[id].parent];
         const children = parent.children.items;
-        
+
         // Find our index
         const idx = std.mem.indexOfScalar(SymbolTrie.NodeId, children, id) orelse return null;
 
@@ -639,9 +639,9 @@ pub const Interface = struct {
                         found_uncle = uncle;
                         break;
                     }
-                    
+
                     if (ancestor == SymbolTrie.RootId) break;
-                    
+
                     ancestor = nodes[ancestor].parent;
                     levels_up += 1;
                 }
@@ -649,7 +649,7 @@ pub const Interface = struct {
                 // 3. Drill back down to maintain visual level
                 if (found_uncle) |uncle| {
                     var target = uncle;
-                    
+
                     // Descend exactly as many times as we ascended to keep "visual horizontal"
                     for (0..levels_up) |_| {
                         const t_node = nodes[target];
@@ -957,7 +957,6 @@ pub const Interface = struct {
             @as(f32, @floatFromInt(context.currentX)));
         const endX: u16 = @intFromFloat((context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
             @as(f32, @floatFromInt(context.currentX)));
-        const len = endX - begX;
 
         // How we draw the bar
         var style = vaxis.Style{
@@ -971,6 +970,7 @@ pub const Interface = struct {
         }
 
         // If we have no cell to draw, no sense going any deeper
+        const len = endX - begX;
         if (len == 0) {
             return;
         }

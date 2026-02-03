@@ -59,8 +59,11 @@ There are several areas where this project could be improved:
 - [ ] **Streaming**: Currently, data collection and visualization are separate phases, so I want to implement streaming.
         This would allow us to view the graph evolve during profiling...! That's really cool. I am also keen to explore
         Further visualization options: real-time moving-average flamegraphs, etc.  
-- [ ] **Navigation**: Adding scrolling and zooming capabilities to handle larger traces.
+    - [ ] **Aggregate** mode: Just start measuring and plotting indefintiely
+    - [ ] **Window** mode: Start streaming, but store stacktries in a ring buffer cycling through them
+    - [ ] **Measure** mode: Fixed duration measurement, minimally invasive
 - [ ] **Better UX**: Improving the overall responsiveness and interactivity. Currently, my vaxis impl. is giga janky.
+        - [ ] Measurement menu, we start the program 
 - [ ] **Write Existing Formats**: If for some arcane reason someone wants to serialize their measurement, we should
         Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
 - [ ] **Help Menu**: To see what the keybindings are. Not important currently, cause I dont have keybindings.
@@ -70,6 +73,9 @@ There are several areas where this project could be improved:
         kernel module or an ebpf program `/proc/kallsyms` changes. We can consider robustness to this, or not and 
         ensure a good message when we cant find it.
 - [ ] **Tests**: I love tests, but I have zero. What the hell?
+- [ ] **Off-CPU**: I want to make off-cpu flamegraphs too, this seems kind of useful.
+    - [ ] mode=offcpu, mode=cpu, etc. CLI arguments
+- [ ] **More Flamegraphs!!**: I'm sure I can cook harder now that I have the basics down
 
 ## AI Usage Disclaimer
 More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

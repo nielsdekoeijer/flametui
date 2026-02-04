@@ -5,6 +5,61 @@ const InstructionPointer = @import("typesystem.zig").InstructionPointer;
 /// ===================================================================================================================
 /// UMap
 /// ===================================================================================================================
+/// UMaps are expensive to load and also can be invalidated, thus we have a cache. This class is a map between PID
+/// and UMap. 
+///
+/// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be 
+/// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to 
+/// trigger a reload.
+pub const UMapCache = struct {
+    backend: std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) !UMapCache {
+        const backend = try std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged).init(
+            allocator,
+            &[_]PID{},
+            &[_]UMapUnmanaged{},
+        );
+
+        return UMapCache{
+            .allocator = allocator,
+            .backend = backend,
+        };
+    }
+
+    /// Return entry given pid, or create it
+    pub fn find(self: *UMapCache, pid: PID) !*UMapUnmanaged {
+        // Try to find it
+        {
+            const found = self.backend.getPtr(pid);
+            if (found) |m| {
+                return m;
+            }
+        }
+
+        // If not found, create one.
+        const map = try UMapUnmanaged.init(self.allocator, pid);
+        try self.backend.put(self.allocator, pid, map);
+
+        // Find it
+        {
+            const found = self.backend.getPtr(pid);
+            if (found) |m| {
+                return m;
+            }
+        }
+
+        // Fail unreachable
+        unreachable;
+    }
+
+    pub fn deinit(self: *UMapCache) void {
+        for (self.backend.values()) |*item| item.deinit(self.allocator);
+        self.backend.deinit(self.allocator);
+    }
+};
+
 /// Userspace process map entry, essentially a model of a line in /proc/*/maps.
 pub const UMapEntry = struct {
     /// File path to the dll
@@ -68,6 +123,8 @@ pub const UMapUnmanaged = struct {
 
     /// Constructor
     pub fn init(allocator: std.mem.Allocator, pid: PID) !UMapUnmanaged {
+        std.log.info("Creating UMap with pid {}...", .{pid});
+
         // Allocate backend
         var backend = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 0);
         errdefer {
@@ -98,6 +155,7 @@ pub const UMapUnmanaged = struct {
         populate(allocator, &backend, &fbs) catch return UnmappedInstance;
         sort(&backend);
 
+        std.log.info("Creating UMap with pid {} OK", .{pid});
         return UMapUnmanaged{
             .internal = .{
                 .loaded = .{
@@ -208,57 +266,3 @@ pub const UMapUnmanaged = struct {
     }
 };
 
-/// UMaps are expensive to load and also can be invalidated, thus we have a cache. This class is a map between PID
-/// and UMap. 
-///
-/// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be 
-/// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to 
-/// trigger a reload.
-pub const UMapCache = struct {
-    backend: std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged),
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) !UMapCache {
-        const backend = try std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged).init(
-            allocator,
-            &[_]PID{},
-            &[_]UMapUnmanaged{},
-        );
-
-        return UMapCache{
-            .allocator = allocator,
-            .backend = backend,
-        };
-    }
-
-    /// Return entry given pid, or create it
-    pub fn find(self: *UMapCache, pid: PID) !*UMapUnmanaged {
-        // Try to find it
-        {
-            const found = self.backend.getPtr(pid);
-            if (found) |m| {
-                return m;
-            }
-        }
-
-        // If not found, create one.
-        const map = try UMapUnmanaged.init(self.allocator, pid);
-        try self.backend.put(self.allocator, pid, map);
-
-        // Find it
-        {
-            const found = self.backend.getPtr(pid);
-            if (found) |m| {
-                return m;
-            }
-        }
-
-        // Fail unreachable
-        unreachable;
-    }
-
-    pub fn deinit(self: *UMapCache) void {
-        for (self.backend.values()) |*item| item.deinit(self.allocator);
-        self.backend.deinit(self.allocator);
-    }
-};

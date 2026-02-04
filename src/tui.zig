@@ -1,6 +1,7 @@
 const vaxis = @import("vaxis");
 const std = @import("std");
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
+const ThreadSafe = @import("lock.zig").ThreadSafe;
 
 /// ===================================================================================================================
 /// TUI
@@ -8,7 +9,7 @@ const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 
 // TODO: Kind of not robust, probably better to use actual vaxis apis. I can't be bothered with that though,
 // moreover this might be easier to swap out to a different plotting library (or roll our own?) down the line
-const Canvas = struct {
+const Layout = struct {
     // Fixed constants, w.r.t provided window, where to start drawing certain things
     // This way of doing it is somewhat not robust, but essentially our window ought to look like:
     //
@@ -97,7 +98,7 @@ const Canvas = struct {
     infoWindowEndInsideX: u16,
     infoWindowEndInsideY: u16,
 
-    pub fn init(win: vaxis.Window) !Canvas {
+    pub fn init(win: vaxis.Window) !Layout {
         std.debug.assert(win.x_off == 0);
         std.debug.assert(win.y_off == 0);
 
@@ -121,7 +122,7 @@ const Canvas = struct {
         const dividerBegY = windowEndY - DividerBottomOffsetY;
         // const dividerEndY =  windowEndY;
 
-        return Canvas{
+        return Layout{
             .flamegraphWindowBegBoundaryX = windowBegX + FlamegraphWBegBoundary,
             .flamegraphWindowBegBoundaryY = windowBegY + FlamegraphHBegBoundary,
             .flamegraphWindowEndBoundaryX = windowEndX - FlamegraphWEndBoundary,
@@ -142,7 +143,60 @@ const Canvas = struct {
     }
 };
 
-// Define a big buffer of nothing, turns out to be useful
+/// Struct handling color state
+const LayoutColors = struct {
+    textColor: vaxis.Color = .{ .index = 15 },
+    rootColor: vaxis.Color = .{ .index = 1 },
+    kernColor: vaxis.Color = .{ .index = 2 },
+    userColor: vaxis.Color = .{ .index = 4 },
+
+    pub fn queryColors(vx: vaxis.Vaxis, tty: *std.Io.Writer) !void {
+        try vx.queryColor(tty, .{ .index = 15 });
+        try vx.queryColor(tty, .{ .index = 1 });
+        try vx.queryColor(tty, .{ .index = 2 });
+        try vx.queryColor(tty, .{ .index = 4 });
+    }
+
+    pub fn ingestReport(self: *LayoutColors, report: vaxis.Color.Report) !void {
+        // We query to do the fancy pants gradients!! Yes
+        switch (report.kind) {
+            .index => |i| {
+                switch (i) {
+                    15 => {
+                        self.textColor = vaxis.Color{
+                            .rgb = report.value,
+                        };
+                    },
+                    1 => {
+                        self.rootColor = vaxis.Color{
+                            .rgb = report.value,
+                        };
+                    },
+                    2 => {
+                        self.userColor = vaxis.Color{
+                            .rgb = report.value,
+                        };
+                    },
+                    4 => {
+                        self.kernColor = vaxis.Color{
+                            .rgb = report.value,
+                        };
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+};
+
+/// Struct holding vaxis internals
+const Canvas = struct {};
+
+/// ===================================================================================================================
+/// Helpers
+/// ===================================================================================================================
+// Define a big buffer of spaces, turns out to be useful
 const space: []const u8 = &[_]u8{' '} ** 512;
 
 /// Helper that leprs between two vaxis colors with interpolation parameter t
@@ -172,64 +226,32 @@ fn dimColor(color: vaxis.Color, t: f32) vaxis.Color {
     }
 }
 
-/// Helper to draw border how I like it
-fn drawBorder(title: []const u8, window: vaxis.Window, x1: u16, y1: u16, x2: u16, y2: u16, color: vaxis.Color) void {
-    const style = vaxis.Style{
-        .fg = color,
-        .bold = true,
-    };
+/// Helper to a think draw border
+fn drawBorder(title: []const u8, window: vaxis.Window, color: vaxis.Color, x1: u16, y1: u16, x2: u16, y2: u16) void {
+    const style = vaxis.Style{ .fg = color, .bold = true };
 
     // Corners
-    window.writeCell(x1, y1, .{
-        .char = .{ .grapheme = "╔" },
-        .style = style,
-    });
-    window.writeCell(x2, y1, .{
-        .char = .{ .grapheme = "╗" },
-        .style = style,
-    });
+    window.writeCell(x1, y1, .{ .char = .{ .grapheme = "╔" }, .style = style });
+    window.writeCell(x2, y1, .{ .char = .{ .grapheme = "╗" }, .style = style });
+    window.writeCell(x1, y2, .{ .char = .{ .grapheme = "╚" }, .style = style });
+    window.writeCell(x2, y2, .{ .char = .{ .grapheme = "╝" }, .style = style });
 
     // Verticals
     for ((y1 + 1)..y2) |y| {
-        window.writeCell(x1, @intCast(y), .{
-            .char = .{ .grapheme = "║" },
-            .style = style,
-        });
-        window.writeCell(x2, @intCast(y), .{
-            .char = .{ .grapheme = "║" },
-            .style = style,
-        });
+        window.writeCell(x1, @intCast(y), .{ .char = .{ .grapheme = "║" }, .style = style });
+        window.writeCell(x2, @intCast(y), .{ .char = .{ .grapheme = "║" }, .style = style });
     }
 
-    // Corners
-    window.writeCell(x1, y2, .{
-        .char = .{ .grapheme = "╚" },
-        .style = style,
-    });
-    window.writeCell(x2, y2, .{
-        .char = .{ .grapheme = "╝" },
-        .style = style,
-    });
-
-    // Horitontal
+    // Horitontals
     for ((x1 + 1)..x2) |x| {
-        window.writeCell(@intCast(x), y1, .{
-            .char = .{ .grapheme = "═" },
-            .style = style,
-        });
-        window.writeCell(@intCast(x), y2, .{
-            .char = .{ .grapheme = "═" },
-            .style = style,
-        });
+        window.writeCell(@intCast(x), y1, .{ .char = .{ .grapheme = "═" }, .style = style });
+        window.writeCell(@intCast(x), y2, .{ .char = .{ .grapheme = "═" }, .style = style });
     }
 
     // Print
-    _ = vaxis.Window.printSegment(window, vaxis.Cell.Segment{ .text = title, .style = style, .link = .{} }, .{
-        .col_offset = x1 + 2,
-        .row_offset = y1,
-        .commit = true,
-        .wrap = .none,
-    });
+    const segment = vaxis.Cell.Segment{ .text = title, .style = style, .link = .{} };
+    const options = vaxis.PrintOptions{ .col_offset = x1 + 2, .row_offset = y1, .commit = true, .wrap = .none };
+    _ = vaxis.Window.printSegment(window, segment, options);
 }
 
 /// Helper to draw over an existing node, keeping its background style
@@ -237,19 +259,92 @@ fn drawCellOverBackground(win: vaxis.Window, x: u16, y: u16, char: []const u8, s
     if (win.readCell(x, y)) |bg_cell| {
         var s = style;
         s.bg = bg_cell.style.bg;
-        win.writeCell(x, y, .{
-            .char = .{ .grapheme = char },
-            .style = s,
-        });
+        win.writeCell(x, y, .{ .char = .{ .grapheme = char }, .style = s });
     }
 }
 
+// Hashing function for consistent randomization of colors, using Greg's original
+fn hashSymbolName(name: []const u8, reverse: bool) f32 {
+    var vector: f32 = 0;
+    var weight: f32 = 1;
+    var max: f32 = 1;
+    var mod: f32 = 10;
+
+    for (0..name.len) |i| {
+        const idx = blk: {
+            if (reverse) {
+                break :blk i;
+            } else {
+                break :blk name.len - 1 - i;
+            }
+        };
+
+        const chr = name[idx];
+        const val = @as(f32, @floatFromInt(@mod(chr, @as(u8, @intFromFloat(mod)))));
+
+        vector += (val / (mod - 1.0)) * weight;
+        max += weight;
+        weight *= 0.70;
+        mod += 1;
+
+        if (mod > 12) {
+            break;
+        }
+    }
+
+    return (1.0 - (vector / max));
+}
+
+/// Colors using greg's original version, provides the classic "flames" for flamegraphs.
+fn getColorFromSymbolNameOriginal(symbolName: []const u8) vaxis.Color {
+    const v1 = hashSymbolName(symbolName, true);
+    const v2 = hashSymbolName(symbolName, false);
+    const v3 = v2;
+
+    return .{
+        .rgb = .{
+            @as(u8, @intFromFloat(50.0 * v3)) + 205,
+            @as(u8, @intFromFloat(230.0 * v1)),
+            @as(u8, @intFromFloat(55.0 * v2)),
+        },
+    };
+}
+
+/// Colors using OUR color approach, based on the users color scheme!
+fn getColorFromSymbolName(symbolName: []const u8, baseColor: vaxis.Color) vaxis.Color {
+    const v1 = 0.5 - hashSymbolName(symbolName, true);
+    const v2 = 0.5 - hashSymbolName(symbolName, false);
+    const v3 = v2;
+
+    switch (baseColor) {
+        .rgb => return vaxis.Color{
+            .rgb = .{
+                // TODO: refactor using saturating adds, this code lookes like shit man
+                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v3)) + @as(i16, @intCast(baseColor.rgb[0])))))),
+                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v1)) + @as(i16, @intCast(baseColor.rgb[1])))))),
+                @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v2)) + @as(i16, @intCast(baseColor.rgb[2])))))),
+            },
+        },
+        else => return baseColor,
+    }
+}
+
+/// ===================================================================================================================
+/// State
+/// ===================================================================================================================
+// Setup event loop
+const VaxisEvent = union(enum) {
+    key_press: vaxis.Key,
+    mouse: vaxis.Mouse,
+    winsize: vaxis.Winsize,
+    color_report: vaxis.Color.Report,
+    redraw: void,
+};
+
 /// Object managing plotting and events
 pub const Interface = struct {
-    textColor: vaxis.Color = .{ .index = 15 },
-    rootColor: vaxis.Color = .{ .index = 1 },
-    kernColor: vaxis.Color = .{ .index = 2 },
-    userColor: vaxis.Color = .{ .index = 4 },
+    // Colors we use for drawing. We base ourselves of the colors of the users terminal
+    colors: LayoutColors = .{},
 
     // Pre-reseve a buffer and a slice to the hit count we optionally print on screen
     infoBufHitCount: [4096]u8 = std.mem.zeroes([4096]u8),
@@ -268,7 +363,7 @@ pub const Interface = struct {
     infoSliceSharedObjectName: ?[]u8 = null,
 
     // Selected node id
-    selectedNodeId: SymbolTrie.NodeId,
+    selectedNodeId: SymbolTrie.NodeId = SymbolTrie.RootId,
 
     // Highlighted node id
     highlightedNodeId: ?SymbolTrie.NodeId = null,
@@ -279,115 +374,17 @@ pub const Interface = struct {
 
     // We want the interface to be able to dynamically swap symbols tries in order to allow for updates, likely
     // with some triple buffering setup
-    // TODO: likely, we will have multiple threads. Thus, we want to have a mutex to guard the symboltrie.
-    // TODO: eventually, we want to support the output of e.g. perf or collapsed stack traces.
-    symbols: ?*SymbolTrie,
+    symbols: *ThreadSafe(SymbolTrie),
+
+    /// Loop handle
+    loop: ?vaxis.Loop(VaxisEvent) = null,
 
     // Bare-bones init
-    pub fn init(allocator: std.mem.Allocator) !Interface {
+    pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe(SymbolTrie)) !Interface {
         return Interface{
             .allocator = allocator,
-            .symbols = null,
-
-            // We start plotting the root node
-            .selectedNodeId = SymbolTrie.RootId,
+            .symbols = symbols,
         };
-    }
-
-    // Hashing function for consistent randomization of colors, using Greg's original
-    fn hashName(name: []const u8, reverse: bool) f32 {
-        var vector: f32 = 0;
-        var weight: f32 = 1;
-        var max: f32 = 1;
-        var mod: f32 = 10;
-
-        for (0..name.len) |i| {
-            const idx = blk: {
-                if (reverse) {
-                    break :blk i;
-                } else {
-                    break :blk name.len - 1 - i;
-                }
-            };
-
-            const chr = name[idx];
-            const val = @as(f32, @floatFromInt(@mod(chr, @as(u8, @intFromFloat(mod)))));
-
-            vector += (val / (mod - 1.0)) * weight;
-            max += weight;
-            weight *= 0.70;
-            mod += 1;
-
-            if (mod > 12) {
-                break;
-            }
-        }
-
-        return (1.0 - (vector / max));
-    }
-
-    /// Colors using greg's original version, provides the classic "flames" for flamegraphs.
-    /// TODO: We don't differentiate per nodes, does original flamegraphs not do this?
-    fn getColorFromNameOriginal(self: Interface, symbolName: []const u8, node: SymbolTrie.TrieNode) vaxis.Color {
-        _ = self;
-        _ = node;
-
-        const v1 = hashName(symbolName, true);
-        const v2 = hashName(symbolName, false);
-        const v3 = v2;
-
-        return .{
-            .rgb = .{
-                @as(u8, @intFromFloat(50.0 * v3)) + 205,
-                @as(u8, @intFromFloat(230.0 * v1)),
-                @as(u8, @intFromFloat(55.0 * v2)),
-            },
-        };
-    }
-
-    /// Colors using OUR color approach, based on the users color scheme!
-    fn getColorFromName(self: Interface, symbolName: []const u8, node: SymbolTrie.TrieNode) vaxis.Color {
-        const v1 = 0.5 - hashName(symbolName, true);
-        const v2 = 0.5 - hashName(symbolName, false);
-        const v3 = v2;
-
-        // TODO: spaghetti, refactor this so that baseColor is provided as an input argument
-        const baseColor = switch (node.payload) {
-            .kernel => self.kernColor,
-            .user => self.userColor,
-            .root => self.rootColor,
-        };
-
-        switch (baseColor) {
-            .rgb => return vaxis.Color{
-                .rgb = .{
-                    // TODO: refactor using saturating adds, this code lookes like shit man
-                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v3)) + @as(i16, @intCast(baseColor.rgb[0])))))),
-                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v1)) + @as(i16, @intCast(baseColor.rgb[1])))))),
-                    @as(u8, @intCast(@max(0, @min(255, @as(i16, @intFromFloat(120.0 * v2)) + @as(i16, @intCast(baseColor.rgb[2])))))),
-                },
-            },
-            else => return baseColor,
-        }
-    }
-
-    // Vaxis events we want to subscribe to
-    const Event = union(enum) {
-        // User IO
-        key_press: vaxis.Key,
-        mouse: vaxis.Mouse,
-
-        // Resize
-        winsize: vaxis.Winsize,
-
-        // When we query the colors for the TUI
-        color_report: vaxis.Color.Report,
-    };
-
-    // Switch out the symboltrie we use on the backend
-    // TODO: this is shit we should improve it
-    pub fn populate(self: *Interface, symbols: *SymbolTrie) void {
-        self.symbols = symbols;
     }
 
     // Start drawing + event loop
@@ -405,9 +402,10 @@ pub const Interface = struct {
         // Configure
         try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_ms);
 
-        // Setup event loop
-        var loop = vaxis.Loop(Event){ .tty = &tty, .vaxis = &vx };
-        try loop.init();
+        self.loop = vaxis.Loop(VaxisEvent){ .tty = &tty, .vaxis = &vx };
+        if (self.loop) |*loop| {
+            try loop.init();
+        }
 
         // Configure vaxis
         try vx.setMouseMode(tty.writer(), true);
@@ -418,48 +416,36 @@ pub const Interface = struct {
         defer vx.exitAltScreen(tty.writer()) catch @panic("couldn't exit alt screen");
 
         // Start measuring events
-        try loop.start();
-        defer loop.stop();
+        if (self.loop) |*loop| {
+            try loop.start();
+        }
+        defer {
+            if (self.loop) |*loop| {
+                loop.stop();
+            }
+        }
 
         // Somewhat arbitrarily I chose this color to show
-        try vx.queryColor(tty.writer(), .{ .index = 1 });
-        try vx.queryColor(tty.writer(), .{ .index = 2 });
-        try vx.queryColor(tty.writer(), .{ .index = 4 });
+        try LayoutColors.queryColors(vx, tty.writer());
 
         // Main loop
         tui_loop: while (true) {
-            var event = loop.nextEvent();
+            var event = self.loop.?.nextEvent();
+
+            const symbols = self.symbols.lock();
+            defer self.symbols.unlock();
 
             var mouse: ?vaxis.Mouse = null;
+
             event_loop: while (true) {
                 // Handle events
                 switch (event) {
-                    .color_report => |c| {
-                        // We query to do the fancy pants gradients!! Yes
-                        switch (c.kind) {
-                            .index => |i| {
-                                switch (i) {
-                                    1 => {
-                                        self.rootColor = vaxis.Color{
-                                            .rgb = c.value,
-                                        };
-                                    },
-                                    2 => {
-                                        self.userColor = vaxis.Color{
-                                            .rgb = c.value,
-                                        };
-                                    },
-                                    4 => {
-                                        self.kernColor = vaxis.Color{
-                                            .rgb = c.value,
-                                        };
-                                    },
-                                    else => {},
-                                }
-                            },
-                            else => {},
-                        }
-                    },
+                    // Handle colors
+                    .color_report => |c| try self.colors.ingestReport(c),
+
+                    // Just stops us from blocking, request redraw workflow
+                    .redraw => {},
+
                     // Presses
                     .key_press => |key| {
                         // Quit conditions
@@ -470,7 +456,7 @@ pub const Interface = struct {
                         // UP (k, w, Arrow Up)
                         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches('w', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                id.* = self.navigate(id.*, .north);
+                                id.* = navigate(symbols.nodes.items, id.*, .north);
                             } else {
                                 self.highlightedNodeId = SymbolTrie.RootId;
                             }
@@ -479,21 +465,21 @@ pub const Interface = struct {
                         // DOWN (j, s, Arrow Down)
                         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches('s', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                id.* = self.navigate(id.*, .south);
+                                id.* = navigate(symbols.nodes.items, id.*, .south);
                             }
                         }
 
                         // RIGHT (l, d, Arrow Right)
                         if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches('d', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                id.* = self.navigate(id.*, .east);
+                                id.* = navigate(symbols.nodes.items, id.*, .east);
                             }
                         }
 
                         // LEFT (h, a, Arrow Left)
                         if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{}) or key.matches('a', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                id.* = self.navigate(id.*, .west);
+                                id.* = navigate(symbols.nodes.items, id.*, .west);
                             }
                         }
 
@@ -507,24 +493,25 @@ pub const Interface = struct {
                             self.selectedNodeId = SymbolTrie.RootId;
                         }
                     },
-                    // Our resize logic
+
+                    // Resize logic
                     .winsize => |winsize| {
                         try vx.resize(self.allocator, tty.writer(), winsize);
                     },
+
                     // Mouse
                     .mouse => |m| {
                         mouse = m;
                     },
                 }
 
-                if (loop.tryEvent()) |next| {
+                if (self.loop.?.tryEvent()) |next| {
                     event = next;
                 } else {
                     break :event_loop;
                 }
             }
 
-            // var timer = try std.time.Timer.start();
             {
                 self.infoSliceHitCount = null;
                 self.infoSliceHitCountPercentages = null;
@@ -532,38 +519,17 @@ pub const Interface = struct {
                 self.infoSliceSharedObjectName = null;
 
                 const win = vx.window();
-                try self.draw(win, mouse);
+                try self.draw(symbols.nodes.items, win, mouse);
                 try vx.render(tty.writer());
             }
-
-            // const elapsed_ns = timer.read();
-            // std.log.info("Draw took: {}ms ({}ns)\n", .{ elapsed_ns / std.time.ns_per_ms, elapsed_ns });
         }
     }
 
-    // TODO: define the minimum and maximum size (oom) for the window such that we bail out when we obtain it
-    // TODO: fuzz interactions + sizes to prevent crashes?
-
-    // Padding for the flamegraph, we plot it slightly offset. We define "inside" (inside the border) and "border"
-    // which means where the border is exactly.
-    const FlamegraphBorderWBegBoundary = 3;
-    const FlamegraphBorderWBegInside = 4;
-    const FlamegraphBorderWEndBoundary = 3;
-    const FlamegraphBorderWEndInside = 4;
-    const FlamegraphBorderHBeg = 2;
-    const FlamegraphBorderHEnd = 10;
-
-    // Info defined relative to flamegraph
-    const InfoBorderWBeg = 3;
-    const InfoBorderWEnd = 4;
-    const InfoBorderHBeg = 2;
-    const InfoBorderHEnd = 1;
-
     // Calculates the depth of a node from the root
-    fn getDepth(self: *Interface, id: SymbolTrie.NodeId) usize {
+    /// TODO: trash LLM code
+    fn getDepth(nodes: []SymbolTrie.TrieNode, id: SymbolTrie.NodeId) usize {
         var depth: usize = 0;
         var curr = id;
-        const nodes = self.symbols.?.nodes.items;
 
         while (curr != SymbolTrie.RootId) {
             depth += 1;
@@ -573,10 +539,9 @@ pub const Interface = struct {
     }
 
     // Finds the immediate sibling index in the given direction
-    fn getSiblingId(self: *Interface, id: SymbolTrie.NodeId, dir: enum { east, west }) ?SymbolTrie.NodeId {
+    /// TODO: trash LLM code
+    fn getSiblingId(nodes: []SymbolTrie.TrieNode, id: SymbolTrie.NodeId, dir: enum { east, west }) ?SymbolTrie.NodeId {
         if (id == SymbolTrie.RootId) return null;
-
-        const nodes = self.symbols.?.nodes.items;
         const parent = nodes[nodes[id].parent];
         const children = parent.children.items;
 
@@ -592,10 +557,8 @@ pub const Interface = struct {
     }
 
     /// Traverses the Trie based on direction with "Gap Jumping" logic for East/West
-    pub fn navigate(self: *Interface, current_id: SymbolTrie.NodeId, dir: enum { north, south, east, west }) SymbolTrie.NodeId {
-        const trie = self.symbols orelse return current_id;
-        const nodes = trie.nodes.items;
-
+    /// TODO: trash LLM code
+    pub fn navigate(nodes: []SymbolTrie.TrieNode, current_id: SymbolTrie.NodeId, dir: enum { north, south, east, west }) SymbolTrie.NodeId {
         if (current_id >= nodes.len) return SymbolTrie.RootId;
         const current_node = nodes[current_id];
 
@@ -624,7 +587,7 @@ pub const Interface = struct {
             },
             .east, .west => {
                 // 1. Try simple sibling move first
-                if (self.getSiblingId(current_id, if (dir == .east) .east else .west)) |sibling| {
+                if (getSiblingId(nodes, current_id, if (dir == .east) .east else .west)) |sibling| {
                     return sibling;
                 }
 
@@ -635,7 +598,7 @@ pub const Interface = struct {
 
                 // Loop until we hit root or find a valid crossover point
                 while (true) {
-                    if (self.getSiblingId(ancestor, if (dir == .east) .east else .west)) |uncle| {
+                    if (getSiblingId(nodes, ancestor, if (dir == .east) .east else .west)) |uncle| {
                         found_uncle = uncle;
                         break;
                     }
@@ -646,7 +609,7 @@ pub const Interface = struct {
                     levels_up += 1;
                 }
 
-                // 3. Drill back down to maintain visual level
+                // Drill back down to maintain visual level
                 if (found_uncle) |uncle| {
                     var target = uncle;
 
@@ -677,15 +640,20 @@ pub const Interface = struct {
     }
 
     // Draw a border
-    fn drawInfo(self: *Interface, window: vaxis.Window, canvas: Canvas) !void {
+    fn drawInfo(
+        self: *Interface,
+        nodes: []SymbolTrie.TrieNode,
+        window: vaxis.Window,
+        layout: Layout,
+    ) !void {
         if (self.highlightedNodeId) |id| {
             // Get out entry
-            const entry = self.symbols.?.nodes.items[id];
+            const entry = nodes[id];
 
             self.infoSliceHitCount = try std.fmt.bufPrint(&self.infoBufHitCount, "hit count:      {}", .{entry.hitCount});
-            const rootHitCount = self.symbols.?.nodes.items[SymbolTrie.RootId].hitCount;
+            const rootHitCount = nodes[SymbolTrie.RootId].hitCount;
             const rootHitCountPercentage = @as(f32, @floatFromInt(entry.hitCount)) / @as(f32, @floatFromInt(rootHitCount)) * 100.0;
-            const parentHitCount = self.symbols.?.nodes.items[entry.parent].hitCount;
+            const parentHitCount = nodes[entry.parent].hitCount;
             const parentHitCountPercentage = @as(f32, @floatFromInt(entry.hitCount)) / @as(f32, @floatFromInt(parentHitCount)) * 100.0;
             self.infoSliceHitCountPercentages = try std.fmt.bufPrint(
                 &self.infoBufHitCountPercentages,
@@ -728,14 +696,14 @@ pub const Interface = struct {
                     vaxis.Cell.Segment{
                         .text = slice,
                         .style = .{
-                            .fg = self.textColor,
+                            .fg = self.colors.textColor,
                             .bold = true,
                         },
                         .link = .{},
                     },
                     .{
-                        .col_offset = canvas.infoWindowBegInsideX,
-                        .row_offset = canvas.infoWindowBegInsideY,
+                        .col_offset = layout.infoWindowBegInsideX,
+                        .row_offset = layout.infoWindowBegInsideY,
                         .commit = true,
                         .wrap = .none,
                     },
@@ -748,14 +716,14 @@ pub const Interface = struct {
                     vaxis.Cell.Segment{
                         .text = slice,
                         .style = .{
-                            .fg = self.textColor,
+                            .fg = self.colors.textColor,
                             .bold = true,
                         },
                         .link = .{},
                     },
                     .{
-                        .col_offset = canvas.infoWindowBegInsideX,
-                        .row_offset = canvas.infoWindowBegInsideY + 1,
+                        .col_offset = layout.infoWindowBegInsideX,
+                        .row_offset = layout.infoWindowBegInsideY + 1,
                         .commit = true,
                         .wrap = .none,
                     },
@@ -768,14 +736,14 @@ pub const Interface = struct {
                     vaxis.Cell.Segment{
                         .text = slice,
                         .style = .{
-                            .fg = self.textColor,
+                            .fg = self.colors.textColor,
                             .bold = true,
                         },
                         .link = .{},
                     },
                     .{
-                        .col_offset = canvas.infoWindowBegInsideX,
-                        .row_offset = canvas.infoWindowBegInsideY + 2,
+                        .col_offset = layout.infoWindowBegInsideX,
+                        .row_offset = layout.infoWindowBegInsideY + 2,
                         .commit = true,
                         .wrap = .none,
                     },
@@ -788,14 +756,14 @@ pub const Interface = struct {
                     vaxis.Cell.Segment{
                         .text = slice,
                         .style = .{
-                            .fg = self.textColor,
+                            .fg = self.colors.textColor,
                             .bold = true,
                         },
                         .link = .{},
                     },
                     .{
-                        .col_offset = canvas.infoWindowBegInsideX,
-                        .row_offset = canvas.infoWindowBegInsideY + 3,
+                        .col_offset = layout.infoWindowBegInsideX,
+                        .row_offset = layout.infoWindowBegInsideY + 3,
                         .commit = true,
                         .wrap = .none,
                     },
@@ -805,52 +773,57 @@ pub const Interface = struct {
     }
 
     // Draw everything to the window
-    fn draw(self: *Interface, win: vaxis.Window, mouse: ?vaxis.Mouse) !void {
+    fn draw(
+        self: *Interface,
+        nodes: []SymbolTrie.TrieNode,
+        win: vaxis.Window,
+        mouse: ?vaxis.Mouse,
+    ) !void {
         // Clear the background
         win.clear();
 
-        // Compute the canvas, will error if our window is too small
-        const canvas = Canvas.init(win) catch return;
+        const layout = Layout.init(win) catch |err| switch (err) {
+            error.InsufficientHeight, error.InsufficientWidth => {
+                std.log.err("Terminal too small, not drawing", .{});
+                return;
+            },
+            else => return err,
+        };
 
         // Draw the flamegraph box
-        drawBorder("FlameGraph", win, canvas.flamegraphWindowBegBoundaryX, canvas.flamegraphWindowBegBoundaryY, //
-            canvas.flamegraphWindowEndBoundaryX, canvas.flamegraphWindowEndBoundaryY, self.textColor);
+        drawBorder(
+            "FlameGraph",
+            win,
+            self.colors.textColor,
+            layout.flamegraphWindowBegBoundaryX,
+            layout.flamegraphWindowBegBoundaryY,
+            layout.flamegraphWindowEndBoundaryX,
+            layout.flamegraphWindowEndBoundaryY,
+        );
 
         // Draw the info box
-        drawBorder("NodeInfo", win, canvas.infoWindowBegBoundaryX, canvas.infoWindowBegBoundaryY, //
-            canvas.infoWindowEndBoundaryX, canvas.infoWindowEndBoundaryY, self.textColor);
+        drawBorder(
+            "NodeInfo",
+            win,
+            self.colors.textColor,
+            layout.infoWindowBegBoundaryX,
+            layout.infoWindowBegBoundaryY,
+            layout.infoWindowEndBoundaryX,
+            layout.infoWindowEndBoundaryY,
+        );
 
         // We may not have any symbols loaded, in which case return
-        if (self.symbols) |_| {
-            // Internal size exclusive of the border
-            const flamegraphW = canvas.flamegraphWindowEndInsideX - canvas.flamegraphWindowBegInsideX + 1;
-            const flamegraphH = canvas.flamegraphWindowEndInsideY - canvas.flamegraphWindowBegInsideY + 1;
+        // Internal size exclusive of the border
+        const flamegraphW = layout.flamegraphWindowEndInsideX - layout.flamegraphWindowBegInsideX + 1;
+        const flamegraphH = layout.flamegraphWindowEndInsideY - layout.flamegraphWindowBegInsideY + 1;
 
-            // Handle mouse events
-            if (mouse) |m| {
-                try self.handleMouse(self.selectedNodeId, m, .{
-                    // We want to draw 100% of the availible space
-                    .widthNormalized = 1.0,
+        if (nodes.len == 0) {
+            return;
+        }
 
-                    // We start at the beginning
-                    .offsetNormalized = 0.0,
-
-                    // We have space consisting
-                    .widthCells = flamegraphW,
-
-                    // We have space consisting
-                    .heightCells = flamegraphH,
-
-                    // Where to start drawing X coord
-                    .currentX = canvas.flamegraphWindowBegInsideX,
-
-                    // Where to start drawing Y coord
-                    .currentY = canvas.flamegraphWindowEndInsideY,
-                });
-            }
-
-            // Draw recursively, first node is the root node
-            try self.drawSymbol(self.selectedNodeId, win, .{
+        // Handle mouse events
+        if (mouse) |m| {
+            try self.handleMouse(nodes, self.selectedNodeId, m, .{
                 // We want to draw 100% of the availible space
                 .widthNormalized = 1.0,
 
@@ -864,21 +837,47 @@ pub const Interface = struct {
                 .heightCells = flamegraphH,
 
                 // Where to start drawing X coord
-                .currentX = canvas.flamegraphWindowBegInsideX,
+                .currentX = layout.flamegraphWindowBegInsideX,
 
                 // Where to start drawing Y coord
-                .currentY = canvas.flamegraphWindowEndInsideY,
-            });
+                .currentY = layout.flamegraphWindowEndInsideY,
 
-            // Draw the info field
-            try self.drawInfo(win, canvas);
-        } else {
-            return;
+                // The highest we can draw
+                .limitY = layout.flamegraphWindowBegInsideY,
+            });
         }
+
+        // Draw recursively, first node is the root node
+        try self.drawSymbol(nodes, self.selectedNodeId, win, .{
+            // We want to draw 100% of the availible space
+            .widthNormalized = 1.0,
+
+            // We start at the beginning
+            .offsetNormalized = 0.0,
+
+            // We have space consisting
+            .widthCells = flamegraphW,
+
+            // We have space consisting
+            .heightCells = flamegraphH,
+
+            // Where to start drawing X coord
+            .currentX = layout.flamegraphWindowBegInsideX,
+
+            // Where to start drawing Y coord
+            .currentY = layout.flamegraphWindowEndInsideY,
+
+            // The highest we can draw
+            .limitY = layout.flamegraphWindowBegInsideY,
+        });
+
+        // Draw the info field
+        try self.drawInfo(nodes, win, layout);
     }
 
     fn handleMouse(
         self: *Interface,
+        nodes: []SymbolTrie.TrieNode,
         entryId: SymbolTrie.NodeId,
         mouse: vaxis.Mouse,
         context: struct {
@@ -888,10 +887,15 @@ pub const Interface = struct {
             heightCells: u16,
             currentX: u16,
             currentY: u16,
+            limitY: u16,
         },
     ) !void {
         // Get out entry
-        const entry = self.symbols.?.nodes.items[entryId];
+        const entry = nodes[entryId];
+
+        if (entry.hitCount == 0 and entryId != SymbolTrie.RootId) {
+            return;
+        }
 
         const begX: u16 = @intFromFloat((context.offsetNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
             @as(f32, @floatFromInt(context.currentX)));
@@ -908,19 +912,23 @@ pub const Interface = struct {
         }
 
         // catch integer underflow
-        if (context.currentY == 0 or context.currentY - 1 < FlamegraphBorderHBeg) {
+        if (context.currentY == 0 or context.currentY - 1 < context.limitY) {
             return;
         }
 
         var childOffset: f32 = context.offsetNormalized;
         for (entry.children.items) |id| {
             // Safe to dereferences as we checked it before
-            const child = self.symbols.?.nodes.items[id];
+            const child = nodes[id];
+
+            if (child.hitCount == 0) continue;
+
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
 
-            try self.handleMouse(id, mouse, .{
+            try self.handleMouse(nodes, id, mouse, .{
                 .currentX = context.currentX,
                 .currentY = context.currentY - 1,
+                .limitY = context.limitY,
                 .widthCells = context.widthCells,
                 .heightCells = context.heightCells,
                 .widthNormalized = childWidth,
@@ -933,6 +941,7 @@ pub const Interface = struct {
 
     fn drawSymbol(
         self: *Interface,
+        nodes: []SymbolTrie.TrieNode,
         entryId: SymbolTrie.NodeId,
         win: vaxis.Window,
         context: struct {
@@ -942,10 +951,16 @@ pub const Interface = struct {
             heightCells: u16,
             currentX: u16,
             currentY: u16,
+            limitY: u16,
         },
     ) !void {
         // Get out entry
-        const entry = self.symbols.?.nodes.items[entryId];
+        const entry = nodes[entryId];
+
+        // Don't draw empty, but do draw if its root
+        if (entry.hitCount == 0 and entryId != SymbolTrie.RootId) {
+            return;
+        }
 
         // How we get the symbol name, works for all enums
         const symbol = blk: switch (entry.payload) {
@@ -958,10 +973,17 @@ pub const Interface = struct {
         const endX: u16 = @intFromFloat((context.offsetNormalized + context.widthNormalized) * @as(f32, @floatFromInt(context.widthCells)) + //
             @as(f32, @floatFromInt(context.currentX)));
 
+        // TODO: spaghetti, refactor this so that baseColor is provided as an input argument
+        const baseColor = switch (entry.payload) {
+            .kernel => self.colors.kernColor,
+            .user => self.colors.userColor,
+            .root => self.colors.rootColor,
+        };
+
         // How we draw the bar
         var style = vaxis.Style{
             .fg = .{ .index = 0 },
-            .bg = self.getColorFromName(symbol, entry),
+            .bg = getColorFromSymbolName(symbol, baseColor),
             .bold = true,
         };
 
@@ -1003,19 +1025,23 @@ pub const Interface = struct {
         }
 
         // catch integer underflow
-        if (context.currentY == 0 or context.currentY - 1 < FlamegraphBorderHBeg) {
+        if (context.currentY == 0 or context.currentY - 1 < context.limitY) {
             return;
         }
 
         var childOffset: f32 = context.offsetNormalized;
         for (entry.children.items) |id| {
             // Safe to dereferences as we checked it before
-            const child = self.symbols.?.nodes.items[id];
+            const child = nodes[id];
+
+            if (child.hitCount == 0) continue;
+
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
 
-            try self.drawSymbol(id, win, .{
+            try self.drawSymbol(nodes, id, win, .{
                 .currentX = context.currentX,
                 .currentY = context.currentY - 1,
+                .limitY = context.limitY,
                 .widthCells = context.widthCells,
                 .heightCells = context.heightCells,
                 .widthNormalized = childWidth,

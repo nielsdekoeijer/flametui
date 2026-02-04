@@ -34,8 +34,11 @@ pub const SharedObjectMap = struct {
     internal: Internal,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !SharedObjectMap {
+        std.log.info("Mapping shared object with path: '{s}'...", .{path});
+
         // If the path is not absolute, do not proceed
         if (!std.fs.path.isAbsolute(path)) {
+            std.log.info("Path for shared object '{s}' not absolute, returning unmapped", .{path});
             return SharedObjectMap{
                 .internal = .{
                     .unmapped = .{},
@@ -49,7 +52,7 @@ pub const SharedObjectMap = struct {
         // Open file
         const file = std.fs.openFileAbsolute(path, .{}) catch {
             // this means either the path we obtained is not valid, or it seized to exist since our first check
-            // TODO: there are edge cases here, probably we want to log a bit to learn what they are
+            std.log.info("Path for shared object '{s}' could not be opened, returning unmapped", .{path});
             return SharedObjectMap{
                 .internal = .{
                     .unmapped = .{},
@@ -70,7 +73,7 @@ pub const SharedObjectMap = struct {
         );
         errdefer std.posix.munmap(mappedSharedObject);
 
-        // Prefault 
+        // Prefault
         try std.posix.madvise(mappedSharedObject.ptr, mappedSharedObject.len, std.posix.MADV.SEQUENTIAL);
 
         // Create a reader
@@ -85,6 +88,7 @@ pub const SharedObjectMap = struct {
 
         sort(&symbols);
 
+        std.log.info("Mapping shared object with path: {s} OK", .{path});
         return SharedObjectMap{
             .internal = .{
                 .loaded = .{
@@ -157,9 +161,14 @@ pub const SharedObjectMap = struct {
     }
 
     pub fn deinit(self: *SharedObjectMap) void {
-        std.posix.munmap(self.mappedSharedObject);
-        self.symbols.deinit(self.allocator);
-        self.allocator.free(self.path);
+        switch (self.internal) {
+            .loaded => |*s| {
+                std.posix.munmap(s.mappedSharedObject);
+                s.symbols.deinit(s.allocator);
+                s.allocator.free(s.path);
+            },
+            else => {},
+        }
     }
 
     fn readHeader(mappedSharedObject: []align(std.heap.page_size_min) const u8) !std.elf.Header {
@@ -184,7 +193,11 @@ pub const SharedObjectMap = struct {
         return header.type;
     }
 
-    fn populate(allocator: std.mem.Allocator, mappedSharedObject: []align(std.heap.page_size_min) const u8, symbols: *std.ArrayListUnmanaged(SharedObjectSymbol)) !void {
+    fn populate(
+        allocator: std.mem.Allocator,
+        mappedSharedObject: []align(std.heap.page_size_min) const u8,
+        symbols: *std.ArrayListUnmanaged(SharedObjectSymbol),
+    ) !void {
         const header = try readHeader(mappedSharedObject);
         switch (readHeaderArchitecture(header)) {
             inline else => |val| {
@@ -273,6 +286,7 @@ pub const SharedObjectMapCache = struct {
         {
             const found = self.backend.getPtr(hashed);
             if (found) |m| {
+                std.log.info("Cache hit on mapping of shared object with path: '{s}'", .{path});
                 return m;
             }
         }
@@ -293,7 +307,7 @@ pub const SharedObjectMapCache = struct {
     }
 
     pub fn deinit(self: *SharedObjectMapCache) void {
-        for (self.backend.values()) |*item| item.deinit(self.allocator);
+        for (self.backend.values()) |*item| item.deinit();
         self.backend.deinit(self.allocator);
     }
 };

@@ -9,11 +9,12 @@ const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 extern "c" fn __cxa_demangle(
     mangled_name: [*c]const u8,
     output_buffer: [*c]u8,
-    length: [*c]usize, // <-- CHANGE THIS to [*c]usize
+    length: [*c]usize, 
     status: *c_int,
 ) [*c]u8;
 
-/// Helper for C++ demanling
+/// Helper for C++ demanling, 
+/// TODO: AI trash
 fn tryDemangle(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const u8 {
     // 1. C++ symbols start with _Z. If not, return original.
     if (!std.mem.startsWith(u8, mangled_name, "_Z")) {
@@ -139,15 +140,13 @@ pub const SymbolTrie = struct {
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
 
-        // GIGA JANK we gotta find a better way 
+        // GIGA JANK we gotta find a better way
         if (self.nodes.items.len == 0) {
             try self.nodes.append(self.allocator, TrieNode{
                 .hitCount = 1,
                 .parent = RootId,
                 .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
-                .payload = .{ 
-                    .root = .{ .symbol = try self.allocator.dupe(u8, "root") } 
-                },
+                .payload = .{ .root = .{ .symbol = try self.allocator.dupe(u8, "root") } },
             });
 
             const rootKey = Key{ .parent = RootId, .symbolHash = hashSymbol("root") };
@@ -169,7 +168,7 @@ pub const SymbolTrie = struct {
                 var spaceIter = std.mem.tokenizeAny(u8, trimmed, " ");
 
                 var countStr: []const u8 = undefined;
-                while(spaceIter.next()) |str| {
+                while (spaceIter.next()) |str| {
                     countStr = str;
                 }
 
@@ -235,9 +234,8 @@ pub const SymbolTrie = struct {
         return std.hash.Wyhash.hash(0, str);
     }
 
-
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
-    pub fn add(self: *SymbolTrie, stacks: StackTrie) !void {
+    pub fn map(self: *SymbolTrie, stacks: StackTrie, mode: enum { merge, remove }) !void {
         // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie. Why
         // cant we have a 1:1 relation? In the symboltrie, we may resolve different instruction pointers to the
         // same symbol name. Idiomatically, for flamegraphs we need to merge them.
@@ -258,6 +256,7 @@ pub const SymbolTrie = struct {
             const parentId = shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
 
             // Find the symbol based on the type of node
+            var mangled = false;
             const symbol = switch (stackItem.payload) {
                 // Root is just given
                 .root => "root",
@@ -265,7 +264,7 @@ pub const SymbolTrie = struct {
                 // TODO: we throw, do we want to do this differently?
                 .kernel => |e| blk: {
                     const s = try self.kmap.find(e.kmapip);
-                    break :blk try self.allocator.dupe(u8, s.symbol);
+                    break :blk s.symbol;
                 },
                 // Use our umap to resolve the symbol
                 // TODO: we throw, do we want to do this differently?
@@ -274,13 +273,20 @@ pub const SymbolTrie = struct {
                     const s = try self.sharedObjectMapCache.find(p.path);
                     switch (s.find(e.umapip, p)) {
                         .found => |w| {
-                            break :blk try self.allocator.dupe(u8, w.name);
+                            mangled = true;
+                            break :blk try tryDemangle(self.allocator, w.name);
                         },
                         .notfound => break :blk "notfound",
                         .unmapped => break :blk "unmapped",
                     }
                 },
             };
+
+            defer {
+                if (mangled) {
+                    self.allocator.free(symbol);
+                }
+            }
 
             // Create the key base on the symbol we just read
             const key = Key{ .parent = parentId, .symbolHash = hashSymbol(symbol) };
@@ -289,49 +295,64 @@ pub const SymbolTrie = struct {
             const found = self.nodesLookup.get(key);
             if (found) |symbolId| {
                 // Hit! Add the total hitcount
-                self.nodes.items[symbolId].hitCount += stackItem.hitCount;
+                switch (mode) {
+                    .merge => {
+                        self.nodes.items[symbolId].hitCount += stackItem.hitCount;
+                    },
+                    .remove => {
+                        self.nodes.items[symbolId].hitCount -= stackItem.hitCount;
+                    },
+                }
                 try shadowMap.put(self.allocator, stackId, symbolId);
             } else {
-                // Miss! Create the node and append
-                try self.nodes.append(self.allocator, TrieNode{
-                    // Add the stack items hit ount
-                    .hitCount = stackItem.hitCount,
-                    .parent = parentId,
-                    .payload = blk: switch (stackItem.payload) {
-                        .root => break :blk TriePayload{
-                            .root = .{
-                                // take the symbol we duped earlier, takes ownership!
-                                .symbol = symbol,
+                switch (mode) {
+                    .merge => {
+                        // Miss! Create the node and append
+                        try self.nodes.append(self.allocator, TrieNode{
+                            // Add the stack items hit ount
+                            .hitCount = stackItem.hitCount,
+                            .parent = parentId,
+                            .payload = blk: switch (stackItem.payload) {
+                                .root => break :blk TriePayload{
+                                    .root = .{
+                                        // take the symbol + dupe, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                    },
+                                },
+                                .kernel => break :blk TriePayload{
+                                    .kernel = .{
+                                        // take the symbol + dupe, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                    },
+                                },
+                                .user => |e| break :blk TriePayload{
+                                    .user = .{
+                                        // take the symbol, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                        // clone the dll for debug later
+                                        .dll = try self.allocator.dupe(u8, stacks.umaps.items[e.umapid].path),
+                                    },
+                                },
                             },
-                        },
-                        .kernel => break :blk TriePayload{
-                            .kernel = .{
-                                // take the symbol we duped earlier, takes ownership!
-                                .symbol = symbol,
-                            },
-                        },
-                        .user => |e| break :blk TriePayload{
-                            .user = .{
-                                // take the symbol, takes ownership!
-                                .symbol = try tryDemangle(self.allocator, symbol),
-                                // clone the dll for debug later
-                                .dll = try self.allocator.dupe(u8, stacks.umaps.items[e.umapid].path),
-                            },
-                        },
+                            .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
+                        });
+
+                        // Compute the new node id
+                        const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+                        try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                        // Add a mapping between the stack node refering to this symbol
+                        try shadowMap.put(self.allocator, stackId, nodeId);
+
+                        // Go to parent, and add self as child
+                        if (nodeId != parentId) {
+                            try self.nodes.items[parentId].children.append(self.allocator, nodeId);
+                        }
                     },
-                    .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
-                });
-
-                // Compute the new node id
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-                try self.nodesLookup.put(self.allocator, key, nodeId);
-
-                // Add a mapping between the stack node refering to this symbol
-                try shadowMap.put(self.allocator, stackId, nodeId);
-
-                // Go to parent, and add self as child
-                if (nodeId != parentId) {
-                    try self.nodes.items[parentId].children.append(self.allocator, nodeId);
+                    .remove => {
+                        // Miss! But this is not possible, return error
+                        return error.RemoveNonExisting;
+                    },
                 }
             }
         }
@@ -350,5 +371,6 @@ pub const SymbolTrie = struct {
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);
         self.kmap.deinit(self.allocator);
+        self.sharedObjectMapCache.deinit();
     }
 };

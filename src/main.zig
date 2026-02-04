@@ -45,17 +45,8 @@ const Config = struct {
 };
 
 pub fn main() !void {
-    // const memory_size = 256 * 1024 * 1024; 
-    // const backing_buffer = try std.heap.page_allocator.alloc(u8, memory_size);
-    // defer std.heap.page_allocator.free(backing_buffer);
-    // var fba = std.heap.FixedBufferAllocator.init(backing_buffer);
-    // const underlying = fba.allocator();
-
-    const underlying = std.heap.c_allocator;
-
-    var arena = std.heap.ArenaAllocator.init(underlying);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var backend = std.heap.GeneralPurposeAllocator(.{}).init;
+    const allocator = backend.allocator();
 
     var stderrBuffer: [512]u8 = undefined;
     var stderrWriter = std.fs.File.stderr().writer(&stderrBuffer);
@@ -139,12 +130,13 @@ pub fn main() !void {
             var buffer: [4096]u8 = undefined;
             var reader = handle.reader(&buffer);
 
-            var symboltrie = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
+            const symboltrie = try allocator.create(flametui.SymbolTrie);
+            symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
+            defer allocator.destroy(symboltrie); 
             defer symboltrie.free();
 
-            var interface = try flametui.Interface.init(allocator);
-            interface.populate(&symboltrie);
-
+            var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);
+            var interface = try flametui.Interface.init(allocator, &symbols);
             try interface.start();
         } else {
             try stderrWriter.interface.print("Missing file path", .{});

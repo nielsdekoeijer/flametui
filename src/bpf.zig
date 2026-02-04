@@ -9,7 +9,7 @@ pub fn setupLoggerBackend(mode: enum { zig, none }) !void {
     };
 }
 
-pub fn loadProgramAligned(allocator: std.mem.Allocator, data: anytype) ![]const u8 {
+pub fn loadProgramAligned(allocator: std.mem.Allocator, data: anytype) ![]align(8) const u8 {
     const code = try allocator.alignedAlloc(u8, .@"8", data.len);
     @memcpy(code, data);
 

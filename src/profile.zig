@@ -1,4 +1,6 @@
 const std = @import("std");
+const bpf = @import("bpf.zig");
+const c = @import("cimport.zig").c;
 
 pub const Program = @import("profile_streaming");
 
@@ -6,7 +8,7 @@ pub const Program = @import("profile_streaming");
 /// Helpers
 /// ===================================================================================================================
 /// The event type from bpf
-pub const EventTypeRaw = u64; 
+pub const EventTypeRaw = u64;
 
 /// Our parsed view over the raw data, note we dont clone for efficiencies sake
 pub const EventType = struct {
@@ -30,3 +32,118 @@ pub const EventType = struct {
     }
 };
 
+/// Name of the function in our bpf program
+const ProfileFunctionName = "do_sample";
+
+/// ===================================================================================================================
+/// Wrappers
+/// ===================================================================================================================
+/// Wrapper around our profiling ebpf program
+pub const Profiler = struct {
+    allocator: std.mem.Allocator,
+    bytecode: []align(8) const u8,
+    object: bpf.Object,
+    links: []bpf.Object.Link,
+    ring: bpf.Object.RingBufferMap,
+    missed: *u64,
+
+    pub fn init(
+        comptime ContextType: type,
+        comptime handler: *const fn (*ContextType, *const EventTypeRaw) void,
+        allocator: std.mem.Allocator,
+        context: *ContextType,
+    ) anyerror!Profiler {
+
+        // Configure logging
+        try bpf.setupLoggerBackend(.zig);
+
+        // Load our embedded code into an byte array with 8 byte alignment
+        const code = try bpf.loadProgramAligned(allocator, Program.bytecode);
+        errdefer allocator.free(code);
+
+        // Use my bpf "library" to wrap the Object
+        const object = try bpf.Object.load(code);
+        errdefer object.free();
+
+        // Create links
+        const cpuCount = try std.Thread.getCpuCount();
+        const links = try allocator.alloc(bpf.Object.Link, cpuCount);
+        for (links) |*link| link.internal = null;
+        errdefer {
+            for (links) |*link| {
+                link.free();
+            }
+        }
+
+        // Create ringbuffer
+        const ring = try object.attachRingBufferMapCallback(
+            ContextType,
+            EventTypeRaw,
+            handler,
+            context,
+            "events",
+        );
+
+        // Global from the program
+        const missed = try object.getGlobals(u64);
+
+        return Profiler{
+            .allocator = allocator,
+            .bytecode = code,
+            .object = object,
+            .links = links,
+            .ring = ring,
+            .missed = missed,
+        };
+    }
+
+    pub fn start(self: Profiler, rate: usize) !void {
+        var attributes = std.os.linux.perf_event_attr{
+            .type = .SOFTWARE,
+            .sample_period_or_freq = rate,
+            .config = c.PERF_COUNT_SW_CPU_CLOCK,
+            .flags = .{
+                .freq = true,
+                .mmap = true,
+            },
+        };
+
+        // Attach programs to each cpu
+        for (0..self.links.len) |i| {
+            self.links[i] = try self.object.attachProgramPerfEventByName(ProfileFunctionName, i, &attributes);
+        }
+    }
+
+    pub fn stop(self: Profiler) void {
+        defer {
+            for (self.links) |*link| {
+                link.free();
+            }
+        }
+    }
+
+    pub fn run(self: Profiler, rate: usize, nanoseconds: u64) anyerror!void {
+        try self.start(rate);
+
+        // Run
+        var timer = try std.time.Timer.start();
+
+        while (timer.read() < nanoseconds) {
+            const count = try self.ring.consume();
+
+            if (count == 0) {
+                try self.ring.poll(10);
+            }
+        }
+    }
+
+    pub fn free(self: *Profiler) void {
+        self.allocator.free(self.bytecode);
+        self.object.free();
+        for (self.links) |*link| {
+            link.free();
+        }
+
+        self.ring.free();
+    }
+};

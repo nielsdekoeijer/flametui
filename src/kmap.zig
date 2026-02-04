@@ -28,6 +28,8 @@ pub const KMapUnmanaged = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator) !KMapUnmanaged {
+        std.log.info("Populating kernel map...", .{});
+
         // Allocate backend, with a huge size
         var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 512_000);
         errdefer {
@@ -50,6 +52,7 @@ pub const KMapUnmanaged = struct {
         // I'm pretty sure we don't have to sort it, but I'm gonna do it anyway
         sort(&backend);
 
+        std.log.info("Populating kernel map OK", .{});
         return KMapUnmanaged{
             .backend = backend,
         };

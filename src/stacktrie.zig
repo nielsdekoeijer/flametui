@@ -239,6 +239,19 @@ pub const StackTrie = struct {
         }
     }
 
+    pub fn reset(self: *StackTrie) void {
+        // We keep the root node (index 0) alive, but reset its hit count.
+        self.nodes.items.len = 1;
+        self.nodes.items[RootId].hitCount = 0;
+
+        // Keep allocation, but clear entries
+        self.nodesLookup.clearRetainingCapacity();
+
+        // Keep allocation, but clear entries
+        for (self.umaps.items) |entry| entry.deinit(self.allocator);
+        self.umaps.clearRetainingCapacity();
+    }
+
     pub fn free(self: *StackTrie) void {
         for (self.umaps.items) |umap| umap.deinit(self.allocator);
         self.umaps.deinit(self.allocator);

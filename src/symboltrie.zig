@@ -9,11 +9,11 @@ const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 extern "c" fn __cxa_demangle(
     mangled_name: [*c]const u8,
     output_buffer: [*c]u8,
-    length: [*c]usize, 
+    length: [*c]usize,
     status: *c_int,
 ) [*c]u8;
 
-/// Helper for C++ demanling, 
+/// Helper for C++ demanling,
 /// TODO: AI trash
 fn tryDemangle(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const u8 {
     // 1. C++ symbols start with _Z. If not, return original.
@@ -235,7 +235,7 @@ pub const SymbolTrie = struct {
     }
 
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
-    pub fn map(self: *SymbolTrie, stacks: StackTrie, mode: enum { merge, remove }) !void {
+    pub fn map(self: *SymbolTrie, stacks: StackTrie, mode: enum { merge, evict }) !void {
         // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie. Why
         // cant we have a 1:1 relation? In the symboltrie, we may resolve different instruction pointers to the
         // same symbol name. Idiomatically, for flamegraphs we need to merge them.
@@ -251,6 +251,11 @@ pub const SymbolTrie = struct {
             // Get stack item
             const stackId: NodeId = @intCast(i);
             const stackItem = stacks.nodes.items[stackId];
+
+            // If no hitcount, our eviction logic does nothing
+            if (mode == .evict and stackItem.hitCount == 0) {
+                continue;
+            }
 
             // Resolve the parent (due to the order, should be garunteed to be known)
             const parentId = shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
@@ -299,7 +304,8 @@ pub const SymbolTrie = struct {
                     .merge => {
                         self.nodes.items[symbolId].hitCount += stackItem.hitCount;
                     },
-                    .remove => {
+                    .evict => {
+                        std.log.info("Evicting {} from {} with hitcount {}", .{ stackItem.hitCount, symbolId, self.nodes.items[symbolId].hitCount });
                         self.nodes.items[symbolId].hitCount -= stackItem.hitCount;
                     },
                 }
@@ -349,8 +355,9 @@ pub const SymbolTrie = struct {
                             try self.nodes.items[parentId].children.append(self.allocator, nodeId);
                         }
                     },
-                    .remove => {
+                    .evict => {
                         // Miss! But this is not possible, return error
+                        std.log.info("Evicting {s} failed", .{symbol});
                         return error.RemoveNonExisting;
                     },
                 }

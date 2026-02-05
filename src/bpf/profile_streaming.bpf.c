@@ -9,7 +9,8 @@ struct {
   __uint(max_entries, 8 * 1024 * 1024); // 8MB buffer
 } events SEC(".maps");
 
-__u64 dropped_events = 0;
+volatile __u64 dropped_events = 0;
+volatile __u64 enable_root = 1;
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -32,10 +33,10 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   __u32 key;
 
   // get pid
-  // __u64 pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
   __u64 pid = bpf_get_current_pid_tgid() >> 32;
-  if (pid == 0) {
-      // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
+
+  // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
+  if (pid == 0 && enable_root == 0) {
       return 0;
   }
 

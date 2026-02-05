@@ -34,7 +34,7 @@ const ProfilerContext = struct {
         const now = std.time.nanoTimestamp();
 
         if (now - context.timestamp > context.timeout) {
-            if (context.ring.progressWriter()) |new| {
+            if (context.ring.progressWriterHead()) |new| {
                 context.iptrie = new;
                 context.iptrie.reset();
             }
@@ -57,8 +57,15 @@ pub const StackTrieRing = struct {
     allocator: std.mem.Allocator,
     buffer: []StackTrie,
     mutex: std.Thread.Mutex,
-    head: usize,
-    tail: usize,
+
+    // Currently written by ebpf program
+    writerHead: usize,
+
+    // Newest sample, writerHead - 1, should be merged in symboltrie
+    readerHead: usize,
+
+    // Oldest sample, writerHead + 1, should be evicted in symboltrie
+    readerTail: usize,
 
     /// Initialize the ring with allocated, empty StackTries
     pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieRing {
@@ -71,41 +78,91 @@ pub const StackTrieRing = struct {
             .allocator = allocator,
             .buffer = buffer,
             .mutex = .{},
-            .head = 0,
-            .tail = 0,
+            .writerHead = 0,
+            .readerHead = n - 1,
+            .readerTail = 1,
         };
     }
 
-    /// Returns the NEW head to continue writing.
-    pub fn progressWriter(self: *StackTrieRing) ?*StackTrie {
+    // Returns the next head, or null if it would exceed the readerTail. If null, the eBPF program simply keeps
+    // writing to the same "bucket", i.e. stacktrace. Assumptions about time become more dodgy, but things keep working.
+    pub fn progressWriterHead(self: *StackTrieRing) ?*StackTrie {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const next = (self.head + 1) % self.buffer.len;
+        const nextSlot = (self.writerHead + 1) % self.buffer.len;
 
-        if (next == self.tail) {
+        // Always as close to readerTail as possible, but never overtake
+        if (nextSlot == self.readerTail) {
             return null;
         }
 
-        self.head = next;
-        return &self.buffer[self.head];
+        self.writerHead = nextSlot;
+        std.log.info(
+            "Progressing writer head. Reader head: {}, Reader tail: {}, Writer head: {}",
+            .{ self.readerHead, self.readerTail, self.writerHead },
+        );
+        return &self.buffer[self.writerHead];
     }
 
-    pub fn progressReader(self: *StackTrieRing) ?*StackTrie {
+    // Returns the next reader head, aka the newest stacktrie. Nominally, this should be 1 behind the writer head.
+    // Merges to the symboltrie until null, in which case do nothing.
+    pub fn peekReaderHead(self: *StackTrieRing) ?*StackTrie {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const next = (self.tail + 1) % self.buffer.len;
+        const nextSlot = (self.readerHead + 1) % self.buffer.len;
 
-        if (self.head == self.tail) {
+        // Always as close to writerHead as possible, but never overtage
+        if (nextSlot == self.writerHead) {
             return null;
         }
 
-        self.tail = next;
-        return &self.buffer[self.tail];
+        return &self.buffer[nextSlot];
+    }
+
+    pub fn advanceReaderHead(self: *StackTrieRing) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const nextSlot = (self.readerHead + 1) % self.buffer.len;
+        self.readerHead = nextSlot;
+        std.log.info(
+            "Progressing reader head. Reader head: {}, Reader tail: {}, Writer head: {}",
+            .{ self.readerHead, self.readerTail, self.writerHead },
+        );
+    }
+
+    // Returns the next tail,
+    pub fn peekReaderTail(self: *StackTrieRing) ?*StackTrie {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Should be always 1 ahead of writer (thats the oldest), so if next is the slot beyond that null
+        if (self.readerTail == (self.writerHead + 1) % self.buffer.len) {
+            return &self.buffer[self.readerTail];
+        }
+
+        return null;
+    }
+
+    pub fn advanceReaderTail(self: *StackTrieRing) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const nextSlot = (self.readerTail + 1) % self.buffer.len;
+        self.readerTail = nextSlot;
+
+        std.log.info(
+            "Progressing reader tail. Reader head: {}, Reader tail: {}, Writer head: {}",
+            .{ self.readerHead, self.readerTail, self.writerHead },
+        );
     }
 
     pub fn deinit(self: *StackTrieRing, allocator: std.mem.Allocator) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         for (self.buffer) |*ptr| ptr.free();
         allocator.free(self.buffer);
     }
@@ -127,7 +184,7 @@ pub const App = struct {
 
     pub fn init(allocator: std.mem.Allocator) anyerror!App {
         const ring = try allocator.create(StackTrieRing);
-        ring.* = try StackTrieRing.init(allocator, 3);
+        ring.* = try StackTrieRing.init(allocator, 16);
 
         const context = try allocator.create(ProfilerContext);
 
@@ -136,7 +193,7 @@ pub const App = struct {
             .iptrie = &ring.buffer[0],
             .umapCache = try UMapCache.init(allocator),
             .timestamp = std.time.nanoTimestamp(),
-            .timeout = 50 * std.time.ns_per_ms,
+            .timeout = 100 * std.time.ns_per_ms,
         };
 
         const profiler = try Profiler.init(ProfilerContext, ProfilerContext.callback, allocator, context);
@@ -207,12 +264,32 @@ pub const App = struct {
     }
 
     pub fn tick(self: *App) !void {
-        while (self.ring.progressReader()) |stack_trie| {
+        var shouldRedraw = false;
+        if (self.ring.peekReaderTail()) |stack_trie| {
             const symbols = self.symbols.lock();
             defer self.symbols.unlock();
+
+            try symbols.map(stack_trie.*, .evict);
+            stack_trie.reset();
+
+            self.ring.advanceReaderTail();
+
+            shouldRedraw = true;
+        }
+
+        while (self.ring.peekReaderHead()) |stack_trie| {
+            const symbols = self.symbols.lock();
+            defer self.symbols.unlock();
+
             try symbols.map(stack_trie.*, .merge);
 
-            if (self.interface.loop) |*loop| {
+            self.ring.advanceReaderHead();
+
+            shouldRedraw = true;
+        }
+
+        if (self.interface.loop) |*loop| {
+            if (shouldRedraw) {
                 loop.postEvent(.{ .redraw = {} });
             }
         }

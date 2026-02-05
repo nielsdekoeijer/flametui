@@ -26,12 +26,22 @@ const Config = struct {
             \\Usage: {s} [command] [options]
             \\
             \\Commands:
-            \\  record       Run profiling
+            \\  fixed        Run profiling for a fixed duration
+            \\  aggregate    Run profiling and aggregate stack traces
+            \\  ring         Run profiling and store stack traces in ring buffer
             \\  file <path>  Load a collapsed stacktrace file
             \\
-            \\Options (record):
+            \\Options (fixed):
             \\  --hz <int>   Sampling frequency in Hertz (default: 49)
             \\  --ms <int>   Profile duration in milliseconds (default: 1000)
+            \\
+            \\Options (aggregate):
+            \\  --hz <int>   Sampling frequency in Hertz (default: 49)
+            \\
+            \\Options (ring):     
+            \\  --hz <int>   Sampling frequency in Hertz (default: 49)
+            \\  --ms <int>   Size of ring slot in milliseconds (default: 250)
+            \\  --n  <int>   Number of slots in ring buffer, minimum 4 (default: 10)
             \\
             \\General:
             \\  --verbose    Enable verbose logging
@@ -63,7 +73,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, cmd, "record")) {
+    if (std.mem.eql(u8, cmd, "aggregate")) {
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--verbose")) {
                 verbose = true;
@@ -100,7 +110,7 @@ pub fn main() !void {
         }
 
         if (std.os.linux.geteuid() != 0) {
-            try stderrWriter.interface.print("Insufficient permissions: requires root to record\n", .{});
+            try stderrWriter.interface.print("Insufficient permissions: requires root to aggregate\n", .{});
             try stderrWriter.interface.flush();
             std.process.exit(1);
         }

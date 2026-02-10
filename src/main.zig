@@ -17,19 +17,29 @@ fn logHandle(
     std.log.defaultLog(level, scope, format, args);
 }
 
+const Command = enum {
+    fixed,
+    aggregate,
+    ring,
+    file,
+};
+
 const Config = struct {
+    command: Command,
     hz: usize = 49,
     duration_ms: u64 = 1000,
+    ring_slots: usize = 10,
+    file_path: ?[]const u8 = null,
 
-    pub fn usage(exe_name: []const u8, print: *std.Io.Writer) !void {
-        try print.print(
+    pub fn usage(exe_name: []const u8, writer: *std.Io.Writer) !void {
+        try writer.print(
             \\Usage: {s} [command] [options]
             \\
             \\Commands:
-            \\  fixed        Run profiling for a fixed duration
-            \\  aggregate    Run profiling and aggregate stack traces
-            \\  ring         Run profiling and store stack traces in ring buffer
-            \\  file <path>  Load a collapsed stacktrace file
+            \\  fixed        Run profiling for a fixed duration (default: 1000ms)
+            \\  aggregate    Run profiling indefinitely, aggregating stack traces
+            \\  ring         Run profiling with a sliding window ring buffer
+            \\  file <path>  Load and visualize a collapsed stacktrace file
             \\
             \\Options (fixed):
             \\  --hz <int>   Sampling frequency in Hertz (default: 49)
@@ -38,9 +48,9 @@ const Config = struct {
             \\Options (aggregate):
             \\  --hz <int>   Sampling frequency in Hertz (default: 49)
             \\
-            \\Options (ring):     
+            \\Options (ring):
             \\  --hz <int>   Sampling frequency in Hertz (default: 49)
-            \\  --ms <int>   Size of ring slot in milliseconds (default: 250)
+            \\  --ms <int>   Size of ring slot in milliseconds (default: 50)
             \\  --n  <int>   Number of slots in ring buffer, minimum 4 (default: 10)
             \\
             \\General:
@@ -49,92 +59,135 @@ const Config = struct {
             \\
             \\
         , .{exe_name});
-
-        try print.flush();
+        try writer.flush();
     }
 };
+
+fn parseIntArg(comptime T: type, args: *std.process.ArgIterator, flag: []const u8, writer: *std.Io.Writer, exe_name: []const u8) T {
+    const val = args.next() orelse {
+        writer.print("Missing value for {s}\n", .{flag}) catch {};
+        Config.usage(exe_name, writer) catch {};
+        writer.flush() catch {};
+        std.process.exit(1);
+    };
+    return std.fmt.parseInt(T, val, 10) catch |err| {
+        writer.print("Invalid number for {s}: {s} ({})\n", .{ flag, val, err }) catch {};
+        writer.flush() catch {};
+        std.process.exit(1);
+    };
+}
+
+fn exitWithMessage(writer: *std.Io.Writer, exe_name: []const u8, comptime fmt: []const u8, fmtargs: anytype) noreturn {
+    writer.print(fmt, fmtargs) catch {};
+    Config.usage(exe_name, writer) catch {};
+    writer.flush() catch {};
+    std.process.exit(1);
+}
 
 pub fn main() !void {
     var backend = std.heap.GeneralPurposeAllocator(.{}).init;
     const allocator = backend.allocator();
 
-    var stderrBuffer: [512]u8 = undefined;
-    var stderrWriter = std.fs.File.stderr().writer(&stderrBuffer);
-
-    var config = Config{};
+    var stderr_buf: [512]u8 = undefined;
+    var stderr = std.fs.File.stderr().writer(&stderr_buf);
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
     const exe_name = args.next() orelse "flametui";
 
-    const cmd = args.next() orelse {
-        try Config.usage(exe_name, &stderrWriter.interface);
+    const cmd_str = args.next() orelse {
+        try Config.usage(exe_name, &stderr.interface);
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, cmd, "aggregate")) {
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--verbose")) {
-                verbose = true;
-            } else if (std.mem.eql(u8, arg, "--hz")) {
-                const val = args.next() orelse {
-                    try stderrWriter.interface.print("Missing value for --hz\n", .{});
-                    try Config.usage(exe_name, &stderrWriter.interface);
-                    try stderrWriter.interface.flush();
-                    std.process.exit(1);
-                };
-                config.hz = std.fmt.parseInt(usize, val, 10) catch |err| {
-                    try stderrWriter.interface.print("Invalid number for --hz: {s} ({})\n", .{ val, err });
-                    try stderrWriter.interface.flush();
-                    std.process.exit(1);
-                };
-            } else if (std.mem.eql(u8, arg, "--ms")) {
-                const val = args.next() orelse {
-                    try stderrWriter.interface.print("Missing value for --ms\n", .{});
-                    try Config.usage(exe_name, &stderrWriter.interface);
-                    try stderrWriter.interface.flush();
-                    std.process.exit(1);
-                };
-                config.duration_ms = std.fmt.parseInt(u64, val, 10) catch |err| {
-                    try stderrWriter.interface.print("Invalid number for --ms: {s} ({})\n", .{ val, err });
-                    try stderrWriter.interface.flush();
-                    std.process.exit(1);
-                };
+    // Handle --help / -h as first argument
+    if (std.mem.eql(u8, cmd_str, "--help") or std.mem.eql(u8, cmd_str, "-h")) {
+        try Config.usage(exe_name, &stderr.interface);
+        std.process.exit(0);
+    }
+
+    // Parse command
+    const command: Command = if (std.mem.eql(u8, cmd_str, "fixed"))
+        .fixed
+    else if (std.mem.eql(u8, cmd_str, "aggregate"))
+        .aggregate
+    else if (std.mem.eql(u8, cmd_str, "ring"))
+        .ring
+    else if (std.mem.eql(u8, cmd_str, "file"))
+        .file
+    else {
+        exitWithMessage(&stderr.interface, exe_name, "Unknown command: {s}\n", .{cmd_str});
+    };
+
+    var config = Config{ .command = command };
+
+    // Parse remaining args
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try Config.usage(exe_name, &stderr.interface);
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "--hz")) {
+            config.hz = parseIntArg(usize, &args, "--hz", &stderr.interface, exe_name);
+        } else if (std.mem.eql(u8, arg, "--ms")) {
+            config.duration_ms = parseIntArg(u64, &args, "--ms", &stderr.interface, exe_name);
+        } else if (std.mem.eql(u8, arg, "--n")) {
+            config.ring_slots = parseIntArg(usize, &args, "--n", &stderr.interface, exe_name);
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            // Positional argument — only valid for `file` command
+            if (config.command == .file) {
+                config.file_path = arg;
             } else {
-                try stderrWriter.interface.print("Unknown argument: {s}\n", .{arg});
-                try Config.usage(exe_name, &stderrWriter.interface);
-                try stderrWriter.interface.flush();
-                std.process.exit(1);
+                exitWithMessage(&stderr.interface, exe_name, "Unexpected argument: {s}\n", .{arg});
             }
+        } else {
+            exitWithMessage(&stderr.interface, exe_name, "Unknown option: {s}\n", .{arg});
         }
+    }
 
-        if (std.os.linux.geteuid() != 0) {
-            try stderrWriter.interface.print("Insufficient permissions: requires root to aggregate\n", .{});
-            try stderrWriter.interface.flush();
-            std.process.exit(1);
-        }
+    switch (config.command) {
+        .fixed => {
+            requireRoot(&stderr.interface, exe_name);
 
-        var app = try flametui.App.init(allocator);
-        defer app.free();
-        try app.run(config.hz, config.duration_ms * std.time.ns_per_ms);
-    } else if (std.mem.eql(u8, cmd, "file")) {
-        var file: ?[]const u8 = null;
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--verbose")) {
-                verbose = true;
-            } else if (!std.mem.startsWith(u8, arg, "-")) {
-                file = arg;
-            } else {
-                try stderrWriter.interface.print("Unknown argument: {s}", .{arg});
-                try Config.usage(exe_name, &stderrWriter.interface);
-                try stderrWriter.interface.flush();
-                std.process.exit(1);
+            var app = try flametui.App.init(allocator);
+            defer app.free();
+
+            const timeout_ns = @as(u64, config.duration_ms) * std.time.ns_per_ms;
+            try app.runFixed(config.hz, timeout_ns);
+        },
+        .aggregate => {
+            requireRoot(&stderr.interface, exe_name);
+
+            var app = try flametui.App.init(allocator);
+            defer app.free();
+
+            try app.runAggregate(config.hz);
+        },
+        .ring => {
+            requireRoot(&stderr.interface, exe_name);
+
+            if (config.ring_slots < 4) {
+                exitWithMessage(&stderr.interface, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{config.ring_slots});
             }
-        }
 
-        if (file) |f| {
-            var handle = try std.fs.cwd().openFile(f, .{});
+            var app = try flametui.App.init(allocator);
+            defer app.free();
+
+            const slot_ns = @as(u64, config.duration_ms) * std.time.ns_per_ms;
+            try app.runRing(config.hz, slot_ns, config.ring_slots);
+        },
+        .file => {
+            const path = config.file_path orelse {
+                exitWithMessage(&stderr.interface, exe_name, "Missing file path for 'file' command\n", .{});
+            };
+
+            var handle = std.fs.cwd().openFile(path, .{}) catch |err| {
+                stderr.interface.print("Could not open file '{s}': {}\n", .{ path, err }) catch {};
+                stderr.interface.flush() catch {};
+                std.process.exit(1);
+            };
             defer handle.close();
 
             var buffer: [4096]u8 = undefined;
@@ -142,21 +195,18 @@ pub fn main() !void {
 
             const symboltrie = try allocator.create(flametui.SymbolTrie);
             symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
-            defer allocator.destroy(symboltrie); 
             defer symboltrie.free();
+            defer allocator.destroy(symboltrie);
 
             var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);
             var interface = try flametui.Interface.init(allocator, &symbols);
             try interface.start();
-        } else {
-            try stderrWriter.interface.print("Missing file path", .{});
-            try Config.usage(exe_name, &stderrWriter.interface);
-            try stderrWriter.interface.flush();
-            std.process.exit(1);
-        }
-    } else {
-        try Config.usage(exe_name, &stderrWriter.interface);
-        try stderrWriter.interface.flush();
-        std.process.exit(0);
+        },
+    }
+}
+
+fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
+    if (std.os.linux.geteuid() != 0) {
+        exitWithMessage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
     }
 }

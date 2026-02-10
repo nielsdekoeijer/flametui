@@ -204,7 +204,8 @@ pub const App = struct {
         const symbols = try allocator.create(ThreadSafe(SymbolTrie));
         symbols.* = ThreadSafe(SymbolTrie).init(symboltrie);
 
-        const interface = try Interface.init(allocator, symbols);
+        var interface = try Interface.init(allocator, symbols);
+        interface.missed = profiler.missed;
 
         return App{
             .allocator = allocator,
@@ -241,15 +242,12 @@ pub const App = struct {
         };
 
         while (!self.shouldQuit.load(.acquire)) {
-            const count = self.profiler.ring.consume() catch {
-                @panic("Could not start timer");
-            };
-
-            if (count == 0) {
-                self.profiler.ring.poll(10) catch {
-                    @panic("Could not start timer");
-                };
+            while (true) {
+                const count = self.profiler.ring.consume() catch break;
+                if (count == 0) break;
             }
+
+            std.Thread.sleep(5 * std.time.ns_per_ms);
         }
 
         self.profiler.stop();
@@ -295,9 +293,74 @@ pub const App = struct {
         }
     }
 
-    pub fn run(self: *App, rate: usize, nanoseconds: u64) anyerror!void {
-        self.context.timeout = (nanoseconds / 1_000_000) * std.time.ns_per_ms; // Wait, input is ns?
+    // pub fn run(self: *App, rate: usize, nanoseconds: u64) anyerror!void {
+    //     self.context.timeout = (nanoseconds / 1_000_000) * std.time.ns_per_ms; // Wait, input is ns?
+    //     self.context.timeout = 50 * std.time.ns_per_ms;
+    //     self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+    //     self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+    //
+    //     const merge_interval = 16 * std.time.ns_per_ms;
+    //
+    //     while (!self.shouldQuit.load(.acquire)) {
+    //         try self.tick();
+    //         std.Thread.sleep(merge_interval);
+    //     }
+    // }
+
+    /// Fixed duration measurement. Profile, then display the result. No streaming.
+    pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
+        // No ring rotation — everything goes into one StackTrie
+        self.context.timeout = std.math.maxInt(u64);
+
+        // Profile on this thread, blocking
+        try self.profiler.start(rate);
+        defer self.profiler.stop();
+
+        var timer = try std.time.Timer.start();
+        while (timer.read() < timeout_ns) {
+            const count = try self.profiler.ring.consume();
+            if (count == 0) {
+                try self.profiler.ring.poll(10);
+            }
+        }
+
+        // Merge the single StackTrie into symbols
+        {
+            const symbols = self.symbols.lock();
+            defer self.symbols.unlock();
+            try symbols.map(self.ring.buffer[0], .merge);
+        }
+
+        // Show the TUI (blocks until user quits)
+        try self.interface.start();
+    }
+
+    /// Aggregate indefinitely. Streams results to TUI, never evicts.
+    pub fn runAggregate(self: *App, rate: usize) anyerror!void {
+        // Rotate the ring, but never evict old data
         self.context.timeout = 50 * std.time.ns_per_ms;
+
+        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+        self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+
+        const merge_interval = 16 * std.time.ns_per_ms;
+
+        while (!self.shouldQuit.load(.acquire)) {
+            try self.tickMergeOnly();
+            std.Thread.sleep(merge_interval);
+        }
+    }
+
+    /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
+    pub fn runRing(self: *App, rate: usize, slot_ns: u64, ring_slots: usize) anyerror!void {
+        // Reinitialize ring with requested size
+        self.ring.deinit(self.allocator);
+        self.ring.* = try StackTrieRing.init(self.allocator, ring_slots);
+        self.context.ring = self.ring;
+        self.context.iptrie = &self.ring.buffer[0];
+
+        self.context.timeout = slot_ns;
+
         self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
         self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
 
@@ -306,6 +369,34 @@ pub const App = struct {
         while (!self.shouldQuit.load(.acquire)) {
             try self.tick();
             std.Thread.sleep(merge_interval);
+        }
+    }
+
+    /// Merge only — no eviction. Used by aggregate mode.
+    fn tickMergeOnly(self: *App) !void {
+        var shouldRedraw = false;
+
+        while (self.ring.peekReaderHead()) |stack_trie| {
+            const symbols = self.symbols.lock();
+            defer self.symbols.unlock();
+
+            try symbols.map(stack_trie.*, .merge);
+
+            self.ring.advanceReaderHead();
+            shouldRedraw = true;
+        }
+
+        // Advance tail to follow head — we've consumed the data, free the slots
+        // for the writer. Unlike ring mode, we don't evict from the SymbolTrie.
+        while (self.ring.peekReaderTail()) |stack_trie| {
+            stack_trie.reset();
+            self.ring.advanceReaderTail();
+        }
+
+        if (self.interface.loop) |*loop| {
+            if (shouldRedraw) {
+                loop.postEvent(.{ .redraw = {} });
+            }
         }
     }
 };

@@ -44,7 +44,7 @@ pub const Profiler = struct {
     bytecode: []align(8) const u8,
     object: bpf.Object,
     links: []bpf.Object.Link,
-    ring: bpf.Object.RingBufferMap,
+    ring: bpf.Object.RingBuffer,
     missed: *u64,
 
     pub fn init(
@@ -62,13 +62,12 @@ pub const Profiler = struct {
         errdefer allocator.free(code);
 
         // Use my bpf "library" to wrap the Object
-        const object = try bpf.Object.load(code);
+        var object = try bpf.Object.init(code);
         errdefer object.free();
 
         // Create links
         const cpuCount = try std.Thread.getCpuCount();
         const links = try allocator.alloc(bpf.Object.Link, cpuCount);
-        for (links) |*link| link.internal = null;
         errdefer {
             for (links) |*link| {
                 link.free();
@@ -76,7 +75,7 @@ pub const Profiler = struct {
         }
 
         // Create ringbuffer
-        const ring = try object.attachRingBufferMapCallback(
+        const ring = try object.findRingBuffer(
             ContextType,
             EventTypeRaw,
             handler,
@@ -85,7 +84,7 @@ pub const Profiler = struct {
         );
 
         // Global from the program
-        const missed = try object.getGlobals(u64);
+        const missed = try object.getGlobalSectionPointer(u64);
 
         return Profiler{
             .allocator = allocator,
@@ -108,9 +107,27 @@ pub const Profiler = struct {
             },
         };
 
+        const program = try self.object.findProgram(ProfileFunctionName);
+
         // Attach programs to each cpu
         for (0..self.links.len) |i| {
-            self.links[i] = try self.object.attachProgramPerfEventByName(ProfileFunctionName, i, &attributes);
+            const fd = blk: {
+                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(
+                    &attributes,
+                    -1,
+                    @intCast(i),
+                    -1,
+                    0,
+                ));
+
+                if (pfd == -1) {
+                    return error.PerfEventOpenFailure;
+                }
+
+                break :blk @as(i32, @intCast(pfd));
+            };
+
+            self.links[i] = try program.attachPerfEvent(fd);
         }
     }
 

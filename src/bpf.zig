@@ -1,14 +1,7 @@
 const std = @import("std");
 const c = @import("cimport.zig").c;
 
-pub fn setupLoggerBackend(mode: enum { zig, none }) !void {
-    _ = switch (mode) {
-        .none => c.libbpf_set_print(null),
-        // .zig => c.libbpf_set_print(log),
-        .zig => c.libbpf_set_print(log),
-    };
-}
-
+/// BPF programs need to be aligned.
 pub fn loadProgramAligned(allocator: std.mem.Allocator, data: anytype) ![]align(8) const u8 {
     const code = try allocator.alignedAlloc(u8, .@"8", data.len);
     @memcpy(code, data);
@@ -37,6 +30,7 @@ pub const Object = struct {
 
     pub fn load(mem: []const u8) anyerror!Object {
         const obj = c.bpf_object__open_mem(@ptrCast(mem), mem.len, null) orelse return error.OpenFailure;
+
         errdefer c.bpf_object__close(obj);
 
         if (c.bpf_object__load(obj) != 0) {
@@ -64,18 +58,15 @@ pub const Object = struct {
         const prog: ?*c.bpf_program = c.bpf_object__find_program_by_name(object.internal, name) orelse return error.ProgramNotFound;
 
         const pfd = blk: {
-            const pfd = std.os.linux.perf_event_open(perfEventAttributes, -1, @intCast(cpu), -1, 0);
-            if (pfd == 0) {
-                return error.PerfEventOpenFailure;
-            }
-
+            const pfd: i32 = @intCast(std.os.linux.perf_event_open(perfEventAttributes, -1, @intCast(cpu), -1, 0));
+            if (pfd == -1) return error.PerfEventOpenFailure;
             break :blk pfd;
         };
 
         errdefer {
-            _ = std.os.linux.close(@intCast(pfd));
+            _ = std.os.linux.close(pfd);
         }
-        const link = c.bpf_program__attach_perf_event(prog, @intCast(pfd)) orelse return error.AttachFailure;
+        const link = c.bpf_program__attach_perf_event(prog, pfd) orelse return error.AttachFailure;
         return Link{ .internal = link };
     }
 
@@ -128,7 +119,7 @@ pub const Object = struct {
         }
 
         pub fn consume(self: RingBufferMap) !usize {
-            const ret = c.ring_buffer__consume(self.rb) ;
+            const ret = c.ring_buffer__consume(self.rb);
             if (ret < 0) {
                 return error.ConsumeFailure;
             }
@@ -168,36 +159,59 @@ pub const Object = struct {
     }
 };
 
-const VAListType = blk: switch (@import("builtin").cpu.arch) {
+/// Unfortunately, the underlying C structure generated seems to change per platform, perhaps because of various
+/// defines. Thus, we must switch here between the types.
+const PlatformVAList = blk: switch (@import("builtin").cpu.arch) {
     .aarch64 => break :blk c.struct___va_list_1,
     else => break :blk [*c]c.struct___va_list_tag_1,
 };
 
-fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: VAListType) callconv(.c) c_int {
-    var buf: [512]u8 = undefined;
+/// Logger that can be passed to libbpf, which forwards logs to zig logger
+fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: PlatformVAList) callconv(.c) c_int {
+    // Format print into buf from libc
+    var buf: [1024]u8 = undefined;
     const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);
-    if (len_c == 0) {
+
+    // On error log + return
+    if (len_c < 0) {
+        const errno = std.posix.errno(std.math.lossyCast(usize, len_c));
+        std.log.err("vsnprintf failed: {s}", .{@tagName(errno)});
         return 0;
     }
 
-    const len = @max(0, @min(@as(usize, @intCast(len_c)), buf.len) - 2);
-    if (len > 0) {
-        const slice = buf[0..len];
-        switch (level) {
-            c.LIBBPF_WARN => {
-                std.log.warn("{s}", .{slice});
-            },
-            c.LIBBPF_INFO => {
-                std.log.info("{s}", .{slice});
-            },
-            c.LIBBPF_DEBUG => {
-                std.log.debug("{s}", .{slice});
-            },
-            else => {
-                unreachable;
-            },
-        }
+    // Extract slice sans buffer len and newline + nullterm
+    const raw_len = @min(@as(usize, @intCast(len_c)), buf.len);
+    const slice = std.mem.trimRight(u8, buf[0..raw_len], "\n\x00");
+
+    // If we have for whatever reason an empty log line, we just return len_c
+    if (slice.len == 0) {
+        return len_c;
+    }
+
+    // Map to zig logger
+    switch (level) {
+        c.LIBBPF_WARN => {
+            std.log.warn("libbpf: {s}", .{slice});
+        },
+        c.LIBBPF_INFO => {
+            std.log.info("libbpf: {s}", .{slice});
+        },
+        c.LIBBPF_DEBUG => {
+            std.log.debug("libbpf: {s}", .{slice});
+        },
+        else => {
+            std.log.warn("libbpf (unknown log level): {s}", .{slice});
+        },
     }
 
     return len_c;
+}
+
+/// Helper to configure the logging backend
+pub fn setupLoggerBackend(mode: enum { zig, none }) void {
+    // Setting a logging function pointer to previous logging function, which we choose to discard
+    _ = c.libbpf_set_print(switch (mode) {
+        .none => null,
+        .zig => log,
+    });
 }

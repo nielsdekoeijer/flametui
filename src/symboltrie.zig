@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
+const KMap = @import("kmap.zig").KMap;
 
 const StackTrie = @import("stacktrie.zig").StackTrie;
 
@@ -107,7 +107,7 @@ pub const SymbolTrie = struct {
     allocator: std.mem.Allocator,
 
     /// Kernel maps, assumed static
-    kmap: KMapUnmanaged,
+    kmap: ?KMap,
 
     /// For loading dlls
     sharedObjectMapCache: SharedObjectMapCache,
@@ -121,7 +121,7 @@ pub const SymbolTrie = struct {
                 &[_]NodeId{},
             ),
             .allocator = allocator,
-            .kmap = try KMapUnmanaged.init(allocator),
+            .kmap = try KMap.init(allocator),
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
     }
@@ -136,7 +136,7 @@ pub const SymbolTrie = struct {
                 &[_]NodeId{},
             ),
             .allocator = allocator,
-            .kmap = try KMapUnmanaged.initEmpty(allocator),
+            .kmap = null,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
 
@@ -268,7 +268,7 @@ pub const SymbolTrie = struct {
                 // Use our kmap to resolve the symbol
                 // TODO: we throw, do we want to do this differently?
                 .kernel => |e| blk: {
-                    const s = try self.kmap.find(e.kmapip);
+                    const s = try self.kmap.?.find(e.kmapip);
                     break :blk s.symbol;
                 },
                 // Use our umap to resolve the symbol
@@ -377,7 +377,7 @@ pub const SymbolTrie = struct {
         }
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);
-        self.kmap.deinit(self.allocator);
+        self.kmap.?.deinit();
         self.sharedObjectMapCache.deinit();
     }
 };

@@ -7,4 +7,5 @@ const std = @import("std");
 
 test {
     std.testing.refAllDeclsRecursive(@import("bpf.zig"));
+    std.testing.refAllDeclsRecursive(@import("kmap.zig"));
 }

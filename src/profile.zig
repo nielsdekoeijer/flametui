@@ -155,12 +155,9 @@ pub const Profiler = struct {
     }
 
     pub fn free(self: *Profiler) void {
-        self.allocator.free(self.bytecode);
-        self.object.free();
-        for (self.links) |*link| {
-            link.free();
-        }
-
+        self.allocator.free(self.links);
         self.ring.free();
+        self.object.free();
+        self.allocator.free(self.bytecode);
     }
 };

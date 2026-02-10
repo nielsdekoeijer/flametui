@@ -8,58 +8,56 @@ const InstructionPointer = @import("typesystem.zig").InstructionPointer;
 pub const KMapEntry = struct {
     /// Symbol corresponding to the kernel map
     symbol: []const u8,
+
     /// Instruction pointer corresponding to said symbol
     ip: InstructionPointer,
 };
 
 /// Model of the symbols in /proc/kallsyms
-/// TODO: write unit tests
-pub const KMapUnmanaged = struct {
+pub const KMap = struct {
     /// Kernel map, a model of /proc/kallsyms
     backend: std.ArrayListUnmanaged(KMapEntry),
 
-    // TODO: this is kind of a hack to make the non-recording workflow boot faster. Probably we can do better.
-    // Basically, we conflate the logic in the SymbolTrie to "need" a kmap for the "add" function. The thing is,
-    // when we load from file we don't need to "add" shit, so probably I should have another type entirely
-    pub fn initEmpty(allocator: std.mem.Allocator) !KMapUnmanaged {
-        return KMapUnmanaged{
-            .backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 0),
-        };
-    }
+    /// KMapEntry allocate a bunch of symbols. This turns out to be very inefficient. With this arena, we can manage
+    /// 1 alloc and one dealloc rather than 100k+ seperate ones
+    arena: std.heap.ArenaAllocator,
 
-    pub fn init(allocator: std.mem.Allocator) !KMapUnmanaged {
+    pub fn init(allocator: std.mem.Allocator) !KMap {
         std.log.info("Populating kernel map...", .{});
 
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const underlying = arena.allocator();
+
         // Allocate backend, with a huge size
-        var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(allocator, 512_000);
-        errdefer {
-            for (backend.items) |entry| allocator.free(entry.symbol);
-            backend.deinit(allocator);
-        }
+        var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(underlying, 256_000);
 
         // Relates kernel symbols and addresses
         const file = try std.fs.openFileAbsolute("/proc/kallsyms", .{});
         defer file.close();
 
         // Grab the whole file, note that this file is massive (20 MB+) and this just takes a long time.
-        // We assume the kmap static. This likely a big approximation. 
-        const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-        defer allocator.free(content);
+        // We assume the kmap static. This likely a big approximation.
+        const content = try file.readToEndAlloc(underlying, std.math.maxInt(usize));
+        defer underlying.free(content);
 
         // Populate + sort
-        try populate(allocator, &backend, content);
+        try populate(underlying, &backend, content);
 
         // I'm pretty sure we don't have to sort it, but I'm gonna do it anyway
-        sort(&backend);
+        if (!isSorted(backend.items)) {
+            sort(&backend);
+        }
 
         std.log.info("Populating kernel map OK", .{});
-        return KMapUnmanaged{
+        return KMap{
             .backend = backend,
+            .arena = arena,
         };
     }
 
     /// Find an entry given an instruction pointer
-    pub fn find(self: KMapUnmanaged, ip: InstructionPointer) !KMapEntry {
+    pub fn find(self: KMap, ip: InstructionPointer) error{KMapEntryLookupFailure}!KMapEntry {
         // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
         const index = std.sort.upperBound(KMapEntry, self.backend.items, ip, struct {
             fn lessThan(lhs_ip: u64, rhs_map: KMapEntry) std.math.Order {
@@ -70,8 +68,8 @@ pub const KMapUnmanaged = struct {
         }.lessThan);
 
         // Sort invalid
-        if (index == self.backend.items.len or index == 0) {
-            std.log.err("Failed to lookup KMap with ip: {}", .{ip});
+        if (index == 0) {
+            std.log.warn("Failed to lookup KMap with ip: {}", .{ip});
             return error.KMapEntryLookupFailure;
         }
 
@@ -79,9 +77,25 @@ pub const KMapUnmanaged = struct {
         return self.backend.items[index - 1];
     }
 
-    pub fn deinit(self: *KMapUnmanaged, allocator: std.mem.Allocator) void {
-        for (self.backend.items) |item| allocator.free(item.symbol);
-        self.backend.deinit(allocator);
+    test "find returns correct symbol" {
+        std.testing.log_level = .err;
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        try backend.appendSlice(aa, &.{
+            .{ .ip = 100, .symbol = "a" },
+            .{ .ip = 200, .symbol = "b" },
+            .{ .ip = 300, .symbol = "c" },
+        });
+        const kmap = KMap{ .backend = backend, .arena = arena };
+        try std.testing.expectEqualStrings("b", (try kmap.find(250)).symbol);
+        try std.testing.expectEqualStrings("c", (try kmap.find(350)).symbol);
+        try std.testing.expectError(error.KMapEntryLookupFailure, kmap.find(50));
+    }
+
+    pub fn deinit(self: *KMap) void {
+        self.arena.deinit();
     }
 
     // Helper function that populates the map
@@ -93,11 +107,15 @@ pub const KMapUnmanaged = struct {
     // <-- 16 chars -->   <-- from index 19 onwards                      -->
     // ```
     //
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntry), content: []const u8) !void {
+    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntry), content: []const u8) error{OutOfMemory}!void {
         var lines = std.mem.tokenizeScalar(u8, content, '\n');
 
         // Loop through file contents
         while (lines.next()) |line| {
+            if (line.len < 19) {
+                std.log.warn("Unexpected line of length '{}' encountered while parsing kmap", .{line.len});
+                continue;
+            }
 
             // Grab the address
             const address = std.fmt.parseInt(u64, line[0..16], 16) catch continue;
@@ -107,12 +125,47 @@ pub const KMapUnmanaged = struct {
             const symbolString = iter.next() orelse continue;
 
             // Append to our representation
-            // Note that we own the memory, and thus must clean it
             try backend.append(allocator, KMapEntry{
                 .ip = address,
                 .symbol = try allocator.dupe(u8, symbolString),
             });
         }
+    }
+
+    test "populate parses valid kallsyms lines" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        try KMap.populate(aa, &backend, "ffffffff81000000 T _stext\nffffffff81000010 t helper\n");
+        try std.testing.expectEqual(backend.items.len, 2);
+        try std.testing.expectEqual(backend.items[0].ip, 0xffffffff81000000);
+        try std.testing.expectEqualStrings("_stext", backend.items[0].symbol);
+    }
+
+    test "populate skips short and malformed lines" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        try KMap.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n");
+        try std.testing.expectEqual(backend.items.len, 0);
+    }
+
+    /// Check if map is sorted, usually it is
+    fn isSorted(items: []const KMapEntry) bool {
+        for (items[1..], 0..) |entry, i| {
+            if (entry.ip < items[i].ip) return false;
+        }
+        return true;
+    }
+
+    test "isSorted detects unsorted input" {
+        const items = [_]KMapEntry{
+            .{ .ip = 200, .symbol = "b" },
+            .{ .ip = 100, .symbol = "a" },
+        };
+        try std.testing.expect(!KMap.isSorted(&items));
     }
 
     /// Sorts the map in ascending order for easy binary search

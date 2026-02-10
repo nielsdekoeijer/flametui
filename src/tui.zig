@@ -379,6 +379,9 @@ pub const Interface = struct {
     /// Loop handle
     loop: ?vaxis.Loop(VaxisEvent) = null,
 
+    /// Missed (maybe)
+    missed: ?*const u64 = null,
+
     // Bare-bones init
     pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe(SymbolTrie)) !Interface {
         return Interface{
@@ -790,9 +793,15 @@ pub const Interface = struct {
             else => return err,
         };
 
+        var title_buf: [128]u8 = undefined;
+        const title = if (self.missed) |m|
+            std.fmt.bufPrint(&title_buf, "FlameGraph (dropped: {})", .{m.*}) catch "FlameGraph"
+        else
+            "FlameGraph";
+
         // Draw the flamegraph box
         drawBorder(
-            "FlameGraph",
+            title,
             win,
             self.colors.textColor,
             layout.flamegraphWindowBegBoundaryX,

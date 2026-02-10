@@ -55,7 +55,7 @@ pub const Profiler = struct {
     ) anyerror!Profiler {
 
         // Configure logging
-        try bpf.setupLoggerBackend(.zig);
+        bpf.setupLoggerBackend(.zig);
 
         // Load our embedded code into an byte array with 8 byte alignment
         const code = try bpf.loadProgramAligned(allocator, Program.bytecode);

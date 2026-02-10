@@ -1,106 +1,158 @@
 const std = @import("std");
 const c = @import("cimport.zig").c;
 
-/// BPF programs need to be aligned.
-pub fn loadProgramAligned(allocator: std.mem.Allocator, data: anytype) ![]align(8) const u8 {
+// --------------------------------------------------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------------------------------------------------
+/// BPF programs need to be aligned, this function reallocs given data to be in a way that libbpf can load it.
+/// Necessary as @embed-ing the file will not yield correct alignment
+pub fn loadProgramAligned(allocator: std.mem.Allocator, data: []const u8) error{OutOfMemory}![]align(8) const u8 {
     const code = try allocator.alignedAlloc(u8, .@"8", data.len);
+
     @memcpy(code, data);
 
     return code;
 }
 
-// ------------------------
-// Represents a BPF Object
-// ------------------------
+test "loadProgramAligned returns 8-byte aligned copy" {
+    const input = "hello BPF";
+    const result = try loadProgramAligned(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualSlices(u8, input, result);
+    try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Libbpf object wrapping
+// --------------------------------------------------------------------------------------------------------------------
+/// Wrapper around a libbpf object, which is a loaded elf file. This can contain multiple programs, maps etc.
 pub const Object = struct {
+    /// libbpf underlying object type
     internal: *c.struct_bpf_object,
 
-    fn getMapByName(self: Object, name: [*c]const u8) !*c.struct_bpf_map {
-        return c.bpf_object__find_map_by_name(self.internal, name) orelse error.MapNotFound;
-    }
+    /// Initialize the object from memory
+    pub fn init(mem: []align(8) const u8) error{ OpenFailure, LoadFailure }!Object {
+        // Critical for the memory to be 8 byte aligned
+        std.debug.assert(@intFromPtr(mem.ptr) % 8 == 0);
 
-    pub fn getGlobals(self: Object, comptime T: type) !*T {
-        const map = try self.getMapByName(".bss");
-        var size: usize = 0;
-        const ptr = c.bpf_map__initial_value(map, &size);
-        if (ptr == null) return error.MapNotMmapped;
-        if (size < @sizeOf(T)) return error.MapSizeMismatch;
-        return @as(*T, @ptrCast(@alignCast(ptr)));
-    }
+        // Load the elf file
+        const internal = c.bpf_object__open_mem(@ptrCast(mem), mem.len, null) orelse return error.OpenFailure;
+        errdefer c.bpf_object__close(internal);
 
-    pub fn load(mem: []const u8) anyerror!Object {
-        const obj = c.bpf_object__open_mem(@ptrCast(mem), mem.len, null) orelse return error.OpenFailure;
-
-        errdefer c.bpf_object__close(obj);
-
-        if (c.bpf_object__load(obj) != 0) {
+        // Load it into the kernel
+        if (c.bpf_object__load(internal) < 0) {
             return error.LoadFailure;
         }
 
-        return Object{
-            .internal = obj,
-        };
+        return .{ .internal = internal };
     }
 
-    pub fn attachProgramByName(self: Object, name: [*c]const u8) !Link {
-        const prog: *c.bpf_program = c.bpf_object__find_program_by_name(self.internal, name) orelse return error.ProgramNotFound;
-        // _ = c.bpf_program__attach(prog) orelse return error.AttachFailure;
-        const link = c.bpf_program__attach(prog) orelse return error.AttachFailure;
-        return Link{ .internal = link };
+    test "Object.load rejects invalid ELF" {
+        const program = try loadProgramAligned(std.testing.allocator, "not a valid elf");
+        defer std.testing.allocator.free(program);
+        setupLoggerBackend(.none);
+        try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    pub fn attachProgramPerfEventByName(
-        object: Object,
-        name: [*c]const u8,
-        cpu: usize,
-        perfEventAttributes: *std.os.linux.perf_event_attr,
-    ) anyerror!Link {
-        const prog: ?*c.bpf_program = c.bpf_object__find_program_by_name(object.internal, name) orelse return error.ProgramNotFound;
+    test "Object.load rejects empty input" {
+        const program = try loadProgramAligned(std.testing.allocator, "");
+        defer std.testing.allocator.free(program);
+        setupLoggerBackend(.none);
+        try std.testing.expectError(error.OpenFailure, Object.init(program));
+    }
 
-        const pfd = blk: {
-            const pfd: i32 = @intCast(std.os.linux.perf_event_open(perfEventAttributes, -1, @intCast(cpu), -1, 0));
-            if (pfd == -1) return error.PerfEventOpenFailure;
-            break :blk pfd;
-        };
+    /// Get the global section (.bss) as a pointer to user defined type. The pattern one would use is define a
+    /// structure with all known globals in the bpf program, and pass it as T.
+    pub fn getGlobalSectionPointer(self: Object, comptime T: type) error{ MapNotFound, MapNotMapped, MapSizeMismatch }!*T {
+        // Get the global + static section, which is in .bss
+        const map = c.bpf_object__find_map_by_name(self.internal, ".bss") orelse return error.MapNotFound;
 
-        errdefer {
-            _ = std.os.linux.close(pfd);
+        // Get the pointer
+        var size: usize = 0;
+        const ptr = c.bpf_map__initial_value(map, &size) orelse return error.MapNotMapped;
+
+        // We assert that our map is of the same size as we specify, sanity check
+        if (size != @sizeOf(T)) {
+            return error.MapSizeMismatch;
         }
-        const link = c.bpf_program__attach_perf_event(prog, pfd) orelse return error.AttachFailure;
-        return Link{ .internal = link };
+
+        // Cast to user type
+        return @as(*T, @ptrCast(@alignCast(ptr)));
     }
 
-    pub fn free(self: Object) void {
-        c.bpf_object__close(self.internal);
+    /// Get a program contained within the object
+    pub fn findProgram(self: Object, name: [:0]const u8) error{ProgramNotFound}!Program {
+        const program: *c.bpf_program = c.bpf_object__find_program_by_name(self.internal, name) orelse return error.ProgramNotFound;
+        return .{ .program = program };
     }
 
-    // ------------------------
-    // Link
-    // ------------------------
-    pub const Link = struct {
-        internal: ?*c.struct_bpf_link,
+    /// View over a program stored inside an object
+    pub const Program = struct {
+        program: *c.bpf_program,
 
-        pub fn free(link: *Link) void {
-            if (link.internal != null) {
-                if (c.bpf_link__destroy(link.internal) != 0) {
-                    @panic("ebpf link destruction failure");
-                }
+        /// Generic attachment
+        pub fn attach(self: Program) error{AttachFailure}!Link {
+            const link = c.bpf_program__attach(self.program) orelse return error.AttachFailure;
+            return .{ .link = link };
+        }
 
-                link.internal = null;
-            }
+        /// Attachment with perf event file descriptor
+        /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
+        pub fn attachPerfEvent(self: Program, fd: std.posix.fd_t) error{AttachFailure}!Link {
+            const link = c.bpf_program__attach_perf_event(self.program, fd) orelse return error.AttachFailure;
+            return .{ .link = link };
         }
     };
 
-    // ------------------------
-    // RingBufferMaps
-    // ------------------------
-    pub const RingBufferMap = struct {
-        rb: *c.struct_ring_buffer,
-        pub fn createCallback(
+    /// View over a link to a program
+    pub const Link = struct {
+        link: *c.struct_bpf_link,
+
+        pub fn free(self: *Link) void {
+            if (c.bpf_link__destroy(self.link) != 0) {
+                @panic("ebpf link destruction failure");
+            }
+
+            self.link = undefined;
+        }
+    };
+
+    /// Finds ring buffer, instantiate with a callback
+    pub fn findRingBuffer(
+        self: Object,
+        comptime ContextType: type,
+        comptime EventType: type,
+        comptime handler: *const fn (*ContextType, *const EventType) void,
+        context: *ContextType,
+        name: [:0]const u8,
+    ) error{ RingBufferNotFound, OpenFailure }!RingBuffer {
+        const fd = blk: {
+            const fd = c.bpf_object__find_map_fd_by_name(self.internal, name);
+            if (fd < 0) {
+                return error.RingBufferNotFound;
+            }
+
+            break :blk fd;
+        };
+
+        const cb = RingBuffer.callback(ContextType, EventType, handler);
+        const rb = c.ring_buffer__new(fd, cb, context, null) orelse return error.OpenFailure;
+        errdefer c.ring_buffer__free(rb);
+
+        return RingBuffer{
+            .ringbuffer = rb,
+        };
+    }
+
+    /// View over a ringbuffer with an associated callback
+    pub const RingBuffer = struct {
+        ringbuffer: *c.struct_ring_buffer,
+
+        pub fn callback(
             comptime ContextType: type,
             comptime EventType: type,
             comptime handler: *const fn (*ContextType, *const EventType) void,
-        ) type {
+        ) fn (?*anyopaque, ?*anyopaque, usize) callconv(.c) c_int {
             return struct {
                 pub fn handlerWrapper(ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int {
                     _ = size;
@@ -109,17 +161,17 @@ pub const Object = struct {
                     handler(context, event);
                     return 0;
                 }
-            };
+            }.handlerWrapper;
         }
 
-        pub fn poll(self: RingBufferMap, ms: i64) !void {
-            if (c.ring_buffer__poll(self.rb, @intCast(ms)) < 0) {
+        pub fn poll(self: RingBuffer, ms: i64) error{PollFailure}!void {
+            if (c.ring_buffer__poll(self.ringbuffer, @intCast(ms)) < 0) {
                 return error.PollFailure;
             }
         }
 
-        pub fn consume(self: RingBufferMap) !usize {
-            const ret = c.ring_buffer__consume(self.rb);
+        pub fn consume(self: RingBuffer) error{ConsumeFailure}!usize {
+            const ret = c.ring_buffer__consume(self.ringbuffer);
             if (ret < 0) {
                 return error.ConsumeFailure;
             }
@@ -127,38 +179,22 @@ pub const Object = struct {
             return @intCast(ret);
         }
 
-        pub fn free(self: RingBufferMap) void {
-            c.ring_buffer__free(self.rb);
+        pub fn free(self: *RingBuffer) void {
+            c.ring_buffer__free(self.ringbuffer);
+            self.ringbuffer = undefined;
         }
     };
 
-    pub fn attachRingBufferMapCallback(
-        object: Object,
-        comptime ContextType: type,
-        comptime EventType: type,
-        comptime handler: *const fn (*ContextType, *const EventType) void,
-        context: *ContextType,
-        name: [*c]const u8,
-    ) anyerror!RingBufferMap {
-        const fd = blk: {
-            const fd = c.bpf_object__find_map_fd_by_name(object.internal, name);
-            if (fd < 0) {
-                return error.RingBufferMapNotFound;
-            }
-
-            break :blk fd;
-        };
-
-        const cb = RingBufferMap.createCallback(ContextType, EventType, handler).handlerWrapper;
-        const rb = c.ring_buffer__new(fd, cb, context, null) orelse return error.OpenFailure;
-        errdefer c.ring_buffer__free(rb);
-
-        return RingBufferMap{
-            .rb = rb,
-        };
+    /// Cleanup + invalidate
+    pub fn free(self: *Object) void {
+        c.bpf_object__close(self.internal);
+        self.internal = undefined;
     }
 };
 
+// --------------------------------------------------------------------------------------------------------------------
+// Libbpf logging forwarding
+// --------------------------------------------------------------------------------------------------------------------
 /// Unfortunately, the underlying C structure generated seems to change per platform, perhaps because of various
 /// defines. Thus, we must switch here between the types.
 const PlatformVAList = blk: switch (@import("builtin").cpu.arch) {

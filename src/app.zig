@@ -236,8 +236,8 @@ pub const App = struct {
         self.allocator.destroy(self.ring);
     }
 
-    fn bpfWorker(self: *App, rate: usize) void {
-        self.profiler.start(rate) catch {
+    fn bpfWorker(self: *App, rate: usize, pid: i32) void {
+        self.profiler.start(rate, pid) catch {
             @panic("Could not start profiler");
         };
 
@@ -294,12 +294,12 @@ pub const App = struct {
     }
 
     /// Fixed duration measurement. Profile, then display the result. No streaming.
-    pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
+    pub fn runFixed(self: *App, rate: usize, pid: i32, timeout_ns: u64) anyerror!void {
         // No ring rotation — everything goes into one StackTrie
         self.context.timeout = std.math.maxInt(u64);
 
         // Profile on this thread, blocking
-        try self.profiler.start(rate);
+        try self.profiler.start(rate, pid);
         defer self.profiler.stop();
 
         var timer = try std.time.Timer.start();
@@ -322,11 +322,11 @@ pub const App = struct {
     }
 
     /// Aggregate indefinitely. Streams results to TUI, never evicts.
-    pub fn runAggregate(self: *App, rate: usize) anyerror!void {
+    pub fn runAggregate(self: *App, rate: usize, pid: i32) anyerror!void {
         // Rotate the ring, but never evict old data
         self.context.timeout = 50 * std.time.ns_per_ms;
 
-        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate, pid });
         self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
 
         const merge_interval = 16 * std.time.ns_per_ms;
@@ -338,7 +338,7 @@ pub const App = struct {
     }
 
     /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
-    pub fn runRing(self: *App, rate: usize, slot_ns: u64, ring_slots: usize) anyerror!void {
+    pub fn runRing(self: *App, rate: usize, pid: i32, slot_ns: u64, ring_slots: usize) anyerror!void {
         // Reinitialize ring with requested size
         self.ring.deinit(self.allocator);
         self.ring.* = try StackTrieRing.init(self.allocator, ring_slots);
@@ -347,7 +347,7 @@ pub const App = struct {
 
         self.context.timeout = slot_ns;
 
-        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate, pid });
         self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
 
         const merge_interval = 16 * std.time.ns_per_ms;

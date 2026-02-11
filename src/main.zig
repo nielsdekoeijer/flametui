@@ -19,38 +19,24 @@ fn logHandle(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (!VerboseLogEnabled) return;
+    if (!VerboseLogEnabled) {
+        return;
+    }
+
     std.log.defaultLog(level, scope, format, args);
 }
 
 /// ===================================================================================================================
 /// Arguments
 /// ===================================================================================================================
-fn parseIntArg(comptime T: type, args: *std.process.ArgIterator, flag: []const u8, writer: *std.Io.Writer, exe_name: []const u8) T {
-    const val = args.next() orelse {
-        writer.print("Missing value for {s}\n", .{flag}) catch {};
-        Options.usage(exe_name, writer) catch {};
-        writer.flush() catch {};
-        std.process.exit(1);
-    };
-    return std.fmt.parseInt(T, val, 10) catch |err| {
-        writer.print("Invalid number for {s}: {s} ({})\n", .{ flag, val, err }) catch {};
-        writer.flush() catch {};
-        std.process.exit(1);
-    };
-}
-
-fn exitWithMessage(writer: *std.Io.Writer, exe_name: []const u8, comptime fmt: []const u8, fmtargs: anytype) noreturn {
-    writer.print(fmt, fmtargs) catch {};
-    Options.usage(exe_name, writer) catch {};
-    writer.flush() catch {};
-    std.process.exit(1);
-}
-
 const Options = struct {
+    /// Shared options for all subcommands
     general: GeneralOptions,
+
+    /// Options per command
     command: CommandOptions,
 
+    /// Commands
     const Command = enum {
         fixed,
         aggregate,
@@ -59,18 +45,28 @@ const Options = struct {
         stdin,
     };
 
+    /// General options
+    const GeneralOptions = struct {
+        verbose: bool = false,
+        enable_idle: bool = false,
+    };
+
+    /// Commands with args
     const CommandOptions = union(Command) {
         fixed: struct {
             hz: usize = 49,
             ms: u64 = 1000,
+            pid: i32 = -1,
         },
         aggregate: struct {
             hz: usize = 49,
+            pid: i32 = -1,
         },
         ring: struct {
             hz: usize = 49,
             ms: u64 = 50,
             n: u64 = 4,
+            pid: i32 = -1,
         },
         file: struct {
             file_path: ?[]const u8 = null,
@@ -78,58 +74,80 @@ const Options = struct {
         stdin: struct {},
     };
 
-    const GeneralOptions = struct {
-        verbose: bool = false,
-        enable_idle: bool = false,
-    };
-
     pub fn usage(exe_name: []const u8, writer: *std.Io.Writer) !void {
         try writer.print(
             \\Usage: {s} [command] [options]
             \\
             \\Commands:
-            \\  fixed          Run profiling for a fixed duration (default: 1000ms)
+            \\  fixed          Run profiling for a fixed duration 
             \\  aggregate      Run profiling indefinitely, aggregating stack traces
             \\  ring           Run profiling with a sliding window ring buffer
             \\  file           Load and visualize a collapsed stacktrace file
             \\
-            \\Options (fixed)  :
-            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
-            \\  --ms <int>     Profile duration in milliseconds (default: 1000)
+            \\Options (fixed): 
+            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --ms  <int>    (optional) Profile duration in milliseconds (default: 1000)
+            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (aggregate):
-            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
+            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (ring):  
-            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
-            \\  --ms <int>     Size of ring slot in milliseconds (default: 50)
-            \\  --n  <int>     Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --ms  <int>    (optional) Size of ring slot in milliseconds (default: 50)
+            \\  --n   <int>    (optional) Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (path):  
-            \\  --path <str>   Path to the collapsed stack trace file
+            \\  --path <str>   (required) Path to the collapsed stack trace file
             \\
             \\General:
-            \\  --verbose      Enable verbose logging
-            \\  --enable-idle  While measuring, filter out idle processes (i.e. pid 0)
-            \\  -h, --help     Print this help message
+            \\  --verbose      (optional) Enable verbose logging
+            \\  --enable-idle  (optional) While measuring, filter out idle processes (i.e. pid 0)
+            \\  -h, --help     (optional) Print this help message
             \\
             \\
         , .{exe_name});
+
         try writer.flush();
     }
 
-    pub fn parse(allocator: std.mem.Allocator) Options {
-        _ = allocator;
+    // Helper that prints help and exits
+    fn exitWithUsage(writer: *std.Io.Writer, exe_name: []const u8, comptime fmt: []const u8, fmtargs: anytype) noreturn {
+        writer.print(fmt, fmtargs) catch {};
+        Options.usage(exe_name, writer) catch {};
+        writer.flush() catch {};
+        std.process.exit(1);
+    }
 
-        var stderr_buf: [512]u8 = undefined;
-        var stderr = std.fs.File.stderr().writer(&stderr_buf);
-        const writer = &stderr.interface;
+    /// Args
+    fn parseIntArgOrExit(comptime T: type, args: *std.process.ArgIterator, flag: []const u8, writer: *std.Io.Writer, exe_name: []const u8) T {
+        const val = args.next() orelse {
+            writer.print("Missing value for {s}\n", .{flag}) catch {};
+            Options.usage(exe_name, writer) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
 
-        var args = std.process.argsWithAllocator(std.heap.page_allocator) catch {
+        return std.fmt.parseInt(T, val, 10) catch |err| {
+            writer.print("Invalid number for {s}: {s} ({})\n", .{ flag, val, err }) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
+    }
+
+    /// Get arguments
+    fn getArgumentsOrExit(writer: *std.Io.Writer) std.process.ArgIterator {
+        return std.process.argsWithAllocator(std.heap.page_allocator) catch {
             writer.print("Failed to get process arguments\n", .{}) catch {};
             writer.flush() catch {};
             std.process.exit(1);
         };
+    }
+
+    pub fn parse(writer: *std.Io.Writer) Options {
+        var args = getArgumentsOrExit(writer);
         defer args.deinit();
 
         const exe_name = args.next() orelse "flametui";
@@ -159,13 +177,15 @@ const Options = struct {
             var opts: @TypeOf(@as(CommandOptions, .{ .fixed = .{} }).fixed) = .{};
             while (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--ms")) {
-                    opts.ms = parseIntArg(u64, &args, "--ms", writer, exe_name);
+                    opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--pid")) {
+                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
-                    exitWithMessage(writer, exe_name, "Unknown option for 'fixed': {s}\n", .{arg});
+                    exitWithUsage(writer, exe_name, "Unknown option for 'fixed': {s}\n", .{arg});
                 }
             }
             return .{ .general = general, .command = .{ .fixed = opts } };
@@ -173,11 +193,13 @@ const Options = struct {
             var opts: @TypeOf(@as(CommandOptions, .{ .aggregate = .{} }).aggregate) = .{};
             while (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--pid")) {
+                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
-                    exitWithMessage(writer, exe_name, "Unknown option for 'aggregate': {s}\n", .{arg});
+                    exitWithUsage(writer, exe_name, "Unknown option for 'aggregate': {s}\n", .{arg});
                 }
             }
             return .{ .general = general, .command = .{ .aggregate = opts } };
@@ -185,18 +207,20 @@ const Options = struct {
             var opts: @TypeOf(@as(CommandOptions, .{ .ring = .{} }).ring) = .{};
             while (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--ms")) {
-                    opts.ms = parseIntArg(u64, &args, "--ms", writer, exe_name);
+                    opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--pid")) {
+                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--n")) {
-                    opts.n = parseIntArg(u64, &args, "--n", writer, exe_name);
+                    opts.n = parseIntArgOrExit(u64, &args, "--n", writer, exe_name);
                     if (opts.n < 4) {
-                        exitWithMessage(writer, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{opts.n});
+                        exitWithUsage(writer, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{opts.n});
                     }
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
-                    exitWithMessage(writer, exe_name, "Unknown option for 'ring': {s}\n", .{arg});
+                    exitWithUsage(writer, exe_name, "Unknown option for 'ring': {s}\n", .{arg});
                 }
             }
             return .{ .general = general, .command = .{ .ring = opts } };
@@ -205,22 +229,22 @@ const Options = struct {
             while (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--path")) {
                     opts.file_path = args.next() orelse {
-                        exitWithMessage(writer, exe_name, "Missing value for --path\n", .{});
+                        exitWithUsage(writer, exe_name, "Missing value for --path\n", .{});
                     };
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else if (!std.mem.startsWith(u8, arg, "-")) {
                     opts.file_path = arg;
                 } else {
-                    exitWithMessage(writer, exe_name, "Unknown option for 'file': {s}\n", .{arg});
+                    exitWithUsage(writer, exe_name, "Unknown option for 'file': {s}\n", .{arg});
                 }
             }
             if (opts.file_path == null) {
-                exitWithMessage(writer, exe_name, "Missing file path for 'file' command\n", .{});
+                exitWithUsage(writer, exe_name, "Missing file path for 'file' command\n", .{});
             }
             return .{ .general = general, .command = .{ .file = opts } };
         } else {
-            exitWithMessage(writer, exe_name, "Unknown command: {s}\n", .{cmd_str});
+            exitWithUsage(writer, exe_name, "Unknown command: {s}\n", .{cmd_str});
         }
     }
 
@@ -245,13 +269,14 @@ pub fn main() !void {
     var backend = std.heap.GeneralPurposeAllocator(.{}).init;
     const allocator = backend.allocator();
 
-    const opts = Options.parse(allocator);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr = std.fs.File.stderr().writer(&stderr_buf);
+    const writer = &stderr.interface;
 
+    const opts = Options.parse(writer);
     switch (opts.command) {
-        .fixed => |fixed| {
-            var stderr_buf: [512]u8 = undefined;
-            var stderr = std.fs.File.stderr().writer(&stderr_buf);
-            requireRoot(&stderr.interface, "flametui");
+        inline .fixed, .aggregate, .ring => {
+            requireRoot(writer, "flametui");
 
             var app = try flametui.App.init(allocator);
             defer app.free();
@@ -262,51 +287,27 @@ pub fn main() !void {
                 app.profiler.globals.enable_idle = 0;
             }
 
-            const timeout_ns = fixed.ms * std.time.ns_per_ms;
-            try app.runFixed(fixed.hz, timeout_ns);
-        },
-        .aggregate => |agg| {
-            var stderr_buf: [512]u8 = undefined;
-            var stderr = std.fs.File.stderr().writer(&stderr_buf);
-            requireRoot(&stderr.interface, "flametui");
-
-            var app = try flametui.App.init(allocator);
-            defer app.free();
-
-            if (opts.general.enable_idle) {
-                app.profiler.globals.enable_idle = 1;
-            } else {
-                app.profiler.globals.enable_idle = 0;
+            switch (opts.command) {
+                .aggregate => |command| {
+                    try app.runAggregate(command.hz, command.pid);
+                },
+                .fixed => |command| {
+                    const timeout_ns = command.ms * std.time.ns_per_ms;
+                    try app.runFixed(command.hz, command.pid, timeout_ns);
+                },
+                .ring => |command| {
+                    const slot_ns = command.ms * std.time.ns_per_ms;
+                    try app.runRing(command.hz, command.pid, slot_ns, command.n);
+                },
+                else => unreachable,
             }
-
-            try app.runAggregate(agg.hz);
-        },
-        .ring => |ring| {
-            var stderr_buf: [512]u8 = undefined;
-            var stderr = std.fs.File.stderr().writer(&stderr_buf);
-            requireRoot(&stderr.interface, "flametui");
-
-            var app = try flametui.App.init(allocator);
-            defer app.free();
-
-            if (opts.general.enable_idle) {
-                app.profiler.globals.enable_idle = 1;
-            } else {
-                app.profiler.globals.enable_idle = 0;
-            }
-
-            const slot_ns = ring.ms * std.time.ns_per_ms;
-            try app.runRing(ring.hz, slot_ns, ring.n);
         },
         .file => |file| {
             const path = file.file_path.?;
 
-            var stderr_buf: [512]u8 = undefined;
-            var stderr = std.fs.File.stderr().writer(&stderr_buf);
-
             var handle = std.fs.cwd().openFile(path, .{}) catch |err| {
-                stderr.interface.print("Could not open file '{s}': {}\n", .{ path, err }) catch {};
-                stderr.interface.flush() catch {};
+                writer.print("Could not open file '{s}': {}\n", .{ path, err }) catch {};
+                writer.flush() catch {};
                 std.process.exit(1);
             };
             defer handle.close();
@@ -345,6 +346,6 @@ pub fn main() !void {
 
 fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
     if (std.os.linux.geteuid() != 0) {
-        exitWithMessage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
+        Options.exitWithUsage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
     }
 }

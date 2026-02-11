@@ -87,6 +87,11 @@ There are several areas where this project could be improved:
         Currently we have `UNMAPPED` as our only indication, we can be more robust.
 - [ ] **CI/CD for Release**:
         Currently, you gotta build. This sucks, I can just vendor for all major platforms.
+- [ ] **Increase ring accuracy**:
+        In theory, we can timestamp events and make ring 100% accurate. Now we have a dodgy timer and roulette the 
+        entries.
+- [ ] **Resolve Binary Name**:
+        Currently, I dont grab the binary / proc name! That's a major bug, can just solve that.
 
 ## AI Usage Disclaimer
 Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

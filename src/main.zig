@@ -56,6 +56,7 @@ const Options = struct {
         aggregate,
         ring,
         file,
+        stdin,
     };
 
     const CommandOptions = union(Command) {
@@ -74,6 +75,7 @@ const Options = struct {
         file: struct {
             file_path: ?[]const u8 = null,
         },
+        stdin: struct {},
     };
 
     const GeneralOptions = struct {
@@ -132,9 +134,18 @@ const Options = struct {
 
         const exe_name = args.next() orelse "flametui";
 
-        const cmd_str = args.next() orelse {
-            Options.usage(exe_name, writer) catch {};
-            std.process.exit(1);
+        const cmd_str = blk: {
+            const cmd_str = args.next();
+
+            if (cmd_str == null) {
+                if (!std.fs.File.stdin().isTty()) {
+                    return .{ .general = .{}, .command = .{ .stdin = .{} } };
+                }
+                Options.usage(exe_name, writer) catch {};
+                std.process.exit(1);
+            }
+
+            break :blk cmd_str.?;
         };
 
         if (std.mem.eql(u8, cmd_str, "--help") or std.mem.eql(u8, cmd_str, "-h")) {
@@ -300,11 +311,28 @@ pub fn main() !void {
             };
             defer handle.close();
 
-            var buffer: [4096]u8 = undefined;
+            // MAJOR ISSUE: if lines longer than 4096 -> we're fucked.
+            // TODO: switch all readers to streaming where applicable
+            var buffer: [8192]u8 = undefined;
             var reader = handle.reader(&buffer);
 
             const symboltrie = try allocator.create(flametui.SymbolTrie);
             symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
+            defer symboltrie.deinit();
+            defer allocator.destroy(symboltrie);
+
+            var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);
+            var interface = try flametui.Interface.init(allocator, &symbols);
+            try interface.start();
+        },
+        .stdin => {
+            // MAJOR ISSUE: if lines longer than 4096 -> we're fucked.
+            // TODO: switch all readers to streaming where applicable
+            var stdin_buf: [8192]u8 = undefined;
+            var stdin = std.fs.File.stdin().reader(&stdin_buf);
+
+            const symboltrie = try allocator.create(flametui.SymbolTrie);
+            symboltrie.* = try flametui.SymbolTrie.initPerfScript(allocator, &stdin.interface);
             defer symboltrie.deinit();
             defer allocator.destroy(symboltrie);
 

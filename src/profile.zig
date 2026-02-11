@@ -135,8 +135,9 @@ pub const Profiler = struct {
 
     /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
     /// the connection.
-    pub fn start(self: *Profiler, rate: usize) !void {
+    pub fn start(self: *Profiler, rate: usize, pid: i32) !void {
         // Open perf events
+        std.log.info("Starting perf event with rate {} and pid {}", .{rate, pid});
         var attributes = std.os.linux.perf_event_attr{
             .type = .SOFTWARE,
             .sample_period_or_freq = rate,
@@ -152,7 +153,7 @@ pub const Profiler = struct {
         // Attach programs to each cpu
         for (0..self.links.len) |i| {
             const fd = blk: {
-                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, -1, @intCast(i), -1, 0));
+                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, @intCast(pid), @intCast(i), -1, 0));
 
                 if (pfd == -1) {
                     return error.PerfEventOpenFailure;

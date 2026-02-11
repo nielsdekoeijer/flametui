@@ -62,15 +62,25 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 There are several areas where this project could be improved:
 
-- [ ] **Write Existing Formats**: If for some arcane reason someone wants to serialize their measurement, we should
+- [ ] **Write Existing Formats**: 
+        If for some arcane reason someone wants to serialize their measurement, we should
         Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
-- [ ] **Help Menu**: To see what the keybindings are. Not important currently, cause I dont have keybindings.
-- [ ] **Lifecycle Improvements**: PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
-        Our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
-- [ ] **Tests**: I love tests, but I have zero. What the hell?
-- [ ] **Off-CPU**: I want to make off-cpu flamegraphs too, this seems kind of useful.
+- [ ] **Help Menu**: 
+        To see what the keybindings are. Not important currently, cause I dont have keybindings.
+- [ ] **Lifecycle Improvements**: 
+        PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
+        our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
+- [ ] **Tests**: 
+        I love tests, but I have zero. Fix this, testing as much as is reasonable.
+- [ ] **Off-CPU**: 
+        I want to make off-cpu flamegraphs too, this seems kind of useful.
     - [ ] mode=offcpu, mode=cpu, etc. CLI arguments
-- [ ] **More Flamegraphs!!**: I'm sure I can cook harder now that I have the basics down
+- [ ] **More Flamegraphs!!**: 
+        I'm sure I can cook harder now that I have the basics down
+- [ ] **Filtering**:
+        Specific PID, run on a specified executable 
+- [ ] **Vendoring as Library**:
+        Plug into build.zig to have an e.g. `zig build profile` step.
 
 ## AI Usage Disclaimer
 More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

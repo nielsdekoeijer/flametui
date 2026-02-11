@@ -1,5 +1,5 @@
 const std = @import("std");
-const InstructionPointer = @import("typesystem.zig").InstructionPointer;
+const InstructionPointer = @import("profile.zig").InstructionPointer;
 
 /// ===================================================================================================================
 /// KMap

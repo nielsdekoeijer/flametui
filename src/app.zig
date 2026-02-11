@@ -4,8 +4,8 @@ const vaxis = @import("vaxis");
 const c = @import("cimport.zig").c;
 const bpf = @import("bpf.zig");
 
-const InstructionPointer = @import("typesystem.zig").InstructionPointer;
-const PID = @import("typesystem.zig").PID;
+const InstructionPointer = @import("profile.zig").InstructionPointer;
+const PID = @import("profile.zig").PID;
 const UMapEntry = @import("umap.zig").UMapEntry;
 const UMapCache = @import("umap.zig").UMapCache;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
@@ -163,7 +163,7 @@ pub const StackTrieRing = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        for (self.buffer) |*ptr| ptr.free();
+        for (self.buffer) |*ptr| ptr.deinit();
         allocator.free(self.buffer);
     }
 };
@@ -222,12 +222,12 @@ pub const App = struct {
         if (self.bpfThread) |t| t.join();
         if (self.tuiThread) |t| t.join();
 
-        self.profiler.free();
+        self.profiler.deinit();
         self.context.umapCache.deinit();
         self.allocator.destroy(self.context);
 
         const syms = self.symbols.lock();
-        syms.free();
+        syms.deinit();
         self.symbols.unlock();
         self.allocator.destroy(self.symbols);
         self.allocator.destroy(syms);
@@ -292,20 +292,6 @@ pub const App = struct {
             }
         }
     }
-
-    // pub fn run(self: *App, rate: usize, nanoseconds: u64) anyerror!void {
-    //     self.context.timeout = (nanoseconds / 1_000_000) * std.time.ns_per_ms; // Wait, input is ns?
-    //     self.context.timeout = 50 * std.time.ns_per_ms;
-    //     self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
-    //     self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
-    //
-    //     const merge_interval = 16 * std.time.ns_per_ms;
-    //
-    //     while (!self.shouldQuit.load(.acquire)) {
-    //         try self.tick();
-    //         std.Thread.sleep(merge_interval);
-    //     }
-    // }
 
     /// Fixed duration measurement. Profile, then display the result. No streaming.
     pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
@@ -372,7 +358,7 @@ pub const App = struct {
         }
     }
 
-    /// Merge only — no eviction. Used by aggregate mode.
+    /// Merge only, no eviction. Used by aggregate mode.
     fn tickMergeOnly(self: *App) !void {
         var shouldRedraw = false;
 
@@ -386,8 +372,6 @@ pub const App = struct {
             shouldRedraw = true;
         }
 
-        // Advance tail to follow head — we've consumed the data, free the slots
-        // for the writer. Unlike ring mode, we don't evict from the SymbolTrie.
         while (self.ring.peekReaderTail()) |stack_trie| {
             stack_trie.reset();
             self.ring.advanceReaderTail();

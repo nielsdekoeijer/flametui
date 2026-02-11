@@ -380,7 +380,7 @@ pub const Interface = struct {
     loop: ?vaxis.Loop(VaxisEvent) = null,
 
     /// Missed (maybe)
-    missed: ?*const u64 = null,
+    missed: ?*volatile const u64 = null,
 
     // Bare-bones init
     pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe(SymbolTrie)) !Interface {

@@ -89,7 +89,7 @@ There are several areas where this project could be improved:
         Currently, you gotta build. This sucks, I can just vendor for all major platforms.
 
 ## AI Usage Disclaimer
-More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
+Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
 and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 
 I think this applies especially to software, as software allows for rapid hypothesis testing: even if the LLM barfs 
 some nonesense, you can easily fact check it in many cases. This is less true in other disciplines. 

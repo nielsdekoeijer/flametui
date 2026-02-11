@@ -305,7 +305,7 @@ pub fn main() !void {
 
             const symboltrie = try allocator.create(flametui.SymbolTrie);
             symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
-            defer symboltrie.free();
+            defer symboltrie.deinit();
             defer allocator.destroy(symboltrie);
 
             var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);

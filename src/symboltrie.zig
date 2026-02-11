@@ -4,6 +4,7 @@ const StackTrie = @import("stacktrie.zig").StackTrie;
 const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 const c = @import("cimport.zig").c;
 
+/// We link libcpp for this reason
 extern "c" fn __cxa_demangle(
     mangled_name: [*c]const u8,
     output_buffer: [*c]u8,
@@ -11,8 +12,9 @@ extern "c" fn __cxa_demangle(
     status: *c_int,
 ) [*c]u8;
 
-/// Helper for C++ demanling,
-fn tryDemangle(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const u8 {
+/// Helper for C++ demanling, either demangles or dupes
+/// TODO: Rust also does mangling doesn't it? Probably someone needs to impl that. How I do not know.
+fn tryDemangleOrDupe(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const u8 {
     // C++ symbols start with _Z. If not, return original.
     if (!std.mem.startsWith(u8, mangled_name, "_Z")) {
         return try allocator.dupe(u8, mangled_name);
@@ -23,23 +25,53 @@ fn tryDemangle(allocator: std.mem.Allocator, mangled_name: []const u8) ![]const 
     defer allocator.free(c_name);
 
     // Call __cxa_demangle
-    // status: 0 = success, -1 = memory, -2 = invalid name, -3 = invalid arg
+    // ```
+    // status:
+    //   0 = success
+    //  -1 = memory
+    //  -2 = invalid name
+    //  -3 = invalid arg
+    //  ```
     var status: c_int = undefined;
 
     const demangled_ptr = __cxa_demangle(c_name, null, null, &status);
 
     if (status == 0 and demangled_ptr != null) {
         // Convert to Zig slice and copy to our allocator
-        // We use span to calculate length of the C string
         const len = std.mem.len(demangled_ptr);
         const result = try allocator.dupe(u8, demangled_ptr[0..len]);
 
-        // 5IMPORTANT: Free the memory allocated by __cxa_demangle
+        // Free the memory allocated by __cxa_demangle
         c.free(demangled_ptr);
         return result;
     }
 
     return try allocator.dupe(u8, mangled_name);
+}
+
+test "tryDemangleOrDupe dupes original for non-C++ symbols" {
+    const result = try tryDemangleOrDupe(std.testing.allocator, "main");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("main", result);
+}
+
+test "tryDemangleOrDupe demangles C++ symbol" {
+    const result = try tryDemangleOrDupe(std.testing.allocator, "_ZN3foo3barEv");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("foo::bar()", result);
+}
+
+test "tryDemangleOrDupe returns original for invalid mangled name" {
+    const result = try tryDemangleOrDupe(std.testing.allocator, "_Znonsense");
+    defer std.testing.allocator.free(result);
+    // __cxa_demangle fails, should fall back to original
+    try std.testing.expectEqualStrings("_Znonsense", result);
+}
+
+test "tryDemangleOrDupe handles empty string" {
+    const result = try tryDemangleOrDupe(std.testing.allocator, "");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
 }
 
 /// ===================================================================================================================
@@ -136,7 +168,7 @@ pub const SymbolTrie = struct {
         // GIGA JANK we gotta find a better way
         if (self.nodes.items.len == 0) {
             try self.nodes.append(self.allocator, TrieNode{
-                .hitCount = 1,
+                .hitCount = 0,
                 .parent = RootId,
                 .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
                 .payload = .{ .root = .{ .symbol = try self.allocator.dupe(u8, "root") } },
@@ -196,7 +228,7 @@ pub const SymbolTrie = struct {
                         .payload = .{
                             .user = .{
                                 // take the symbol, takes ownership!
-                                .symbol = try tryDemangle(self.allocator, symbol),
+                                .symbol = try tryDemangleOrDupe(self.allocator, symbol),
                                 // clone the dll for debug later
                                 .dll = try self.allocator.dupe(u8, "<Imported from Collapsed>"),
                             },
@@ -220,6 +252,37 @@ pub const SymbolTrie = struct {
         }
 
         return self;
+    }
+
+    test "initCollapsed parses simple collapsed format" {
+        const input = "main;foo;bar 10\nmain;foo;baz 5\n";
+        var reader = std.Io.Reader.fixed(input);
+
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
+        defer trie.free();
+
+        // root + main + foo + bar + baz = 5 nodes
+        try std.testing.expectEqual(5, trie.nodes.items.len);
+        try std.testing.expectEqual(15, trie.nodes.items[SymbolTrie.RootId].hitCount);
+    }
+
+    test "initCollapsed handles empty input" {
+        var reader = std.Io.Reader.fixed("");
+
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
+        defer trie.free();
+
+        try std.testing.expectEqual(1, trie.nodes.items.len); // just root
+    }
+
+    test "initCollapsed skips blank lines" {
+        const input = "\n\nmain;foo 3\n\n";
+        var reader = std.Io.Reader.fixed(input);
+
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
+        defer trie.free();
+
+        try std.testing.expectEqual(3, trie.nodes.items.len); // root + main + foo
     }
 
     /// Our hashing function
@@ -254,7 +317,7 @@ pub const SymbolTrie = struct {
             const parentId = shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
 
             // Find the symbol based on the type of node
-            var mangled = false;
+            var isfound = false;
             const symbol = switch (stackItem.payload) {
                 // Root is just given
                 .root => "root",
@@ -271,8 +334,8 @@ pub const SymbolTrie = struct {
                     const s = try self.sharedObjectMapCache.find(p.path);
                     switch (s.find(e.umapip, p)) {
                         .found => |w| {
-                            mangled = true;
-                            break :blk try tryDemangle(self.allocator, w.name);
+                            isfound = true;
+                            break :blk try tryDemangleOrDupe(self.allocator, w.name);
                         },
                         .notfound => break :blk "notfound",
                         .unmapped => break :blk "unmapped",
@@ -281,7 +344,7 @@ pub const SymbolTrie = struct {
             };
 
             defer {
-                if (mangled) {
+                if (isfound) {
                     self.allocator.free(symbol);
                 }
             }
@@ -358,8 +421,9 @@ pub const SymbolTrie = struct {
         }
     }
 
-    pub fn free(self: *SymbolTrie) void {
-        for (self.nodes.items) |node| {
+    pub fn deinit(self: *SymbolTrie) void {
+        for (self.nodes.items) |*node| {
+            node.children.deinit(self.allocator);
             switch (node.payload) {
                 .kernel, .root => |s| self.allocator.free(s.symbol),
                 .user => |s| {

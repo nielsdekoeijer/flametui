@@ -22,6 +22,13 @@ test "loadProgramAligned returns 8-byte aligned copy" {
     try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
 }
 
+test "loadProgramAligned handles empty slice" {
+    const result = try loadProgramAligned(std.testing.allocator, "");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqual(0, result.len);
+    try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 // Libbpf object wrapping
 // --------------------------------------------------------------------------------------------------------------------
@@ -63,7 +70,7 @@ pub const Object = struct {
 
     /// Get the global section (.data) as a pointer to user defined type. The pattern one would use is define a
     /// structure with all known globals in the bpf program, and pass it as T.
-    pub fn getGlobalSectionPointer(self: Object, comptime T: type) error{ MapNotFound, MapNotMapped, MapSizeMismatch }!*T {
+    pub fn getGlobalSectionPointer(self: Object, comptime T: type) error{ MapNotFound, MapNotMapped, MapSizeMismatch }!*volatile T {
         // Get the global + static section, which is in .data
         const map = c.bpf_object__find_map_by_name(self.internal, ".data") orelse return error.MapNotFound;
 
@@ -77,7 +84,7 @@ pub const Object = struct {
         }
 
         // Cast to user type
-        return @as(*T, @ptrCast(@alignCast(ptr)));
+        return @as(*volatile T, @ptrCast(@alignCast(ptr)));
     }
 
     /// Get a program contained within the object

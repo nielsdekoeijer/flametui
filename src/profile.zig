@@ -3,6 +3,7 @@ const bpf = @import("bpf.zig");
 const c = @import("cimport.zig").c;
 
 pub const Program = @import("profile_streaming");
+pub const Definitions = @cImport(@cInclude("profile_streaming.bpf.h"));
 
 /// ===================================================================================================================
 /// Helpers
@@ -45,7 +46,7 @@ pub const Profiler = struct {
     object: bpf.Object,
     links: []bpf.Object.Link,
     ring: bpf.Object.RingBuffer,
-    missed: *u64,
+    globals: *Definitions.globals,
 
     pub fn init(
         comptime ContextType: type,
@@ -68,11 +69,6 @@ pub const Profiler = struct {
         // Create links
         const cpuCount = try std.Thread.getCpuCount();
         const links = try allocator.alloc(bpf.Object.Link, cpuCount);
-        errdefer {
-            for (links) |*link| {
-                link.free();
-            }
-        }
 
         // Create ringbuffer
         const ring = try object.findRingBuffer(
@@ -84,7 +80,7 @@ pub const Profiler = struct {
         );
 
         // Global from the program
-        const missed = try object.getGlobalSectionPointer(u64);
+        const globals = try object.getGlobalSectionPointer(Definitions.globals);
 
         return Profiler{
             .allocator = allocator,
@@ -92,7 +88,7 @@ pub const Profiler = struct {
             .object = object,
             .links = links,
             .ring = ring,
-            .missed = missed,
+            .globals = globals,
         };
     }
 

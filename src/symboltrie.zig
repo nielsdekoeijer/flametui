@@ -370,7 +370,9 @@ pub const SymbolTrie = struct {
         }
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);
-        self.kmap.?.deinit();
+        if (self.kmap) |*kmap| {
+            kmap.deinit();
+        }
         self.sharedObjectMapCache.deinit();
     }
 };

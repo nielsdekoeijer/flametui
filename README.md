@@ -28,7 +28,13 @@ zig build -Doptimize=ReleaseFast
 
 # Run the profiler (requires root/CAP_BPF privileges)
 # Sample at 49Hz for 1 second
-sudo zig-out/bin/flametui --hz 49 --time 1000
+sudo zig-out/bin/flametui fixed --hz 49 --ms 1000
+
+# Aggregate indefinitely — streams results to TUI, never evicts
+sudo zig-out/bin/flametui aggregate --hz 49
+
+# Sliding window — keeps the last N time slots, evicts oldest
+sudo zig-out/bin/flametui ring --hz 49 --ms 50 --n 10
 ```
 
 If you dont want to use my profiler (I must admit it is janky), you can also try doing something like:
@@ -42,36 +48,25 @@ sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
 
 # Plot them in the TUI!!
 # NOTE: this records the number of cycles rather than the hit count, but the app still works
-zig-out/bin/flametui --file out.collapsed
+zig-out/bin/flametui file out.collapsed
 ```
 
-Note that you can **click on the nodes** to expand the view! You can unzoom back by hitting escape.
+Note that you can **click on the nodes** to expand the view! You can also navigate with keyboard:
+**hjkl** / **WASD** / **arrow keys** to move, **Enter** to zoom in, **Escape** to unzoom, **q** to quit.
 
-*Note: Requires root privileges...!*
+All profiling commands also accept `--verbose` for debug logging and `--enable-idle` to include idle (pid 0) samples.
+
+*Note: Profiling requires root privileges...!*
 
 ## Future Roadmap / Ideas
 
 There are several areas where this project could be improved:
 
-- [ ] **Libelf Integration**: I'm not sure, but using libbelf might be more robust than manually parsing it with `std.elf` from zig.
-        This is based on my 
-        This is TBD and I am researching this.
-- [ ] **Streaming**: Currently, data collection and visualization are separate phases, so I want to implement streaming.
-        This would allow us to view the graph evolve during profiling...! That's really cool. I am also keen to explore
-        Further visualization options: real-time moving-average flamegraphs, etc.  
-    - [ ] **Aggregate** mode: Just start measuring and plotting indefintiely
-    - [ ] **Window** mode: Start streaming, but store stacktries in a ring buffer cycling through them
-    - [ ] **Measure** mode: Fixed duration measurement, minimally invasive
-- [ ] **Better UX**: Improving the overall responsiveness and interactivity. Currently, my vaxis impl. is giga janky.
-        - [ ] Measurement menu, we start the program 
 - [ ] **Write Existing Formats**: If for some arcane reason someone wants to serialize their measurement, we should
         Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
 - [ ] **Help Menu**: To see what the keybindings are. Not important currently, cause I dont have keybindings.
 - [ ] **Lifecycle Improvements**: PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
         Our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
-- [ ] **Consider dynamic KMap**: Currently, I assume the kernel symbol map is static. I'm pretty sure when you add a 
-        kernel module or an ebpf program `/proc/kallsyms` changes. We can consider robustness to this, or not and 
-        ensure a good message when we cant find it.
 - [ ] **Tests**: I love tests, but I have zero. What the hell?
 - [ ] **Off-CPU**: I want to make off-cpu flamegraphs too, this seems kind of useful.
     - [ ] mode=offcpu, mode=cpu, etc. CLI arguments

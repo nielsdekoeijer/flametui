@@ -5,6 +5,12 @@ const c = @import("cimport.zig").c;
 pub const Program = @import("profile_streaming");
 pub const Definitions = @cImport(@cInclude("profile_streaming.bpf.h"));
 
+/// Alias for the kernel type
+pub const InstructionPointer = u64;
+
+/// Alias for the kernel type
+pub const PID = u32;
+
 /// ===================================================================================================================
 /// Helpers
 /// ===================================================================================================================
@@ -12,6 +18,13 @@ pub const Definitions = @cImport(@cInclude("profile_streaming.bpf.h"));
 pub const EventTypeRaw = u64;
 
 /// Our parsed view over the raw data, note we dont clone for efficiencies sake
+/// Wire layout (all fields are `u64`):
+/// ```
+///   [0]  pid
+///   [1]  user_stack_bytes
+///   [2]  kernel_stack_bytes
+///   [3]  user IPs ... kernel IPs
+/// ```
 pub const EventType = struct {
     pid: u64,
     kips: []const u64,
@@ -33,6 +46,39 @@ pub const EventType = struct {
     }
 };
 
+test "EventType.init parses minimal event with empty stacks" {
+    const raw = [_]u64{ 42, 0, 0 }; // pid=42, 0 user bytes, 0 kernel bytes
+    const event = EventType.init(@ptrCast(&raw));
+    try std.testing.expectEqual(42, event.pid);
+    try std.testing.expectEqual(0, event.uips.len);
+    try std.testing.expectEqual(0, event.kips.len);
+}
+
+test "EventType.init parses event with user and kernel IPs" {
+    const raw = [_]u64{
+        1234, // pid
+        16, // user_stack_bytes = 2 IPs * 8
+        8, // kernel_stack_bytes = 1 IP * 8
+        0xAABB, // uip[0]
+        0xCCDD, // uip[1]
+        0xEEFF, // kip[0]
+    };
+    const event = EventType.init(@ptrCast(&raw));
+    try std.testing.expectEqual(1234, event.pid);
+    try std.testing.expectEqual(2, event.uips.len);
+    try std.testing.expectEqual(0xAABB, event.uips[0]);
+    try std.testing.expectEqual(0xCCDD, event.uips[1]);
+    try std.testing.expectEqual(1, event.kips.len);
+    try std.testing.expectEqual(0xEEFF, event.kips[0]);
+}
+
+test "EventType.init parses kernel-only stacks" {
+    const raw = [_]u64{ 99, 0, 16, 0x1111, 0x2222 };
+    const event = EventType.init(@ptrCast(&raw));
+    try std.testing.expectEqual(0, event.uips.len);
+    try std.testing.expectEqual(2, event.kips.len);
+}
+
 /// Name of the function in our bpf program
 const ProfileFunctionName = "do_sample";
 
@@ -46,15 +92,15 @@ pub const Profiler = struct {
     object: bpf.Object,
     links: []bpf.Object.Link,
     ring: bpf.Object.RingBuffer,
-    globals: *Definitions.globals,
+    globals: *volatile Definitions.globals,
+    running: bool = false,
 
     pub fn init(
         comptime ContextType: type,
         comptime handler: *const fn (*ContextType, *const EventTypeRaw) void,
         allocator: std.mem.Allocator,
         context: *ContextType,
-    ) anyerror!Profiler {
-
+    ) !Profiler {
         // Configure logging
         bpf.setupLoggerBackend(.zig);
 
@@ -69,15 +115,10 @@ pub const Profiler = struct {
         // Create links
         const cpuCount = try std.Thread.getCpuCount();
         const links = try allocator.alloc(bpf.Object.Link, cpuCount);
+        errdefer allocator.free(links);
 
         // Create ringbuffer
-        const ring = try object.findRingBuffer(
-            ContextType,
-            EventTypeRaw,
-            handler,
-            context,
-            "events",
-        );
+        const ring = try object.findRingBuffer(ContextType, EventTypeRaw, handler, context, "events");
 
         // Global from the program
         const globals = try object.getGlobalSectionPointer(Definitions.globals);
@@ -92,7 +133,10 @@ pub const Profiler = struct {
         };
     }
 
-    pub fn start(self: Profiler, rate: usize) !void {
+    /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
+    /// the connection.
+    pub fn start(self: *Profiler, rate: usize) !void {
+        // Open perf events
         var attributes = std.os.linux.perf_event_attr{
             .type = .SOFTWARE,
             .sample_period_or_freq = rate,
@@ -108,13 +152,7 @@ pub const Profiler = struct {
         // Attach programs to each cpu
         for (0..self.links.len) |i| {
             const fd = blk: {
-                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(
-                    &attributes,
-                    -1,
-                    @intCast(i),
-                    -1,
-                    0,
-                ));
+                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, -1, @intCast(i), -1, 0));
 
                 if (pfd == -1) {
                     return error.PerfEventOpenFailure;
@@ -123,34 +161,29 @@ pub const Profiler = struct {
                 break :blk @as(i32, @intCast(pfd));
             };
 
-            self.links[i] = try program.attachPerfEvent(fd);
+            self.links[i] = program.attachPerfEvent(fd) catch |err| {
+                for (0..i) |j| self.links[j].free();
+                std.posix.close(fd); 
+                return err;
+            };
         }
+
+        self.running = true;
     }
 
-    pub fn stop(self: Profiler) void {
-        defer {
+    /// Stop running by detaching the link
+    pub fn stop(self: *Profiler) void {
+        if (self.running) {
             for (self.links) |*link| {
                 link.free();
             }
         }
+
+        self.running = false;
     }
 
-    pub fn run(self: Profiler, rate: usize, nanoseconds: u64) anyerror!void {
-        try self.start(rate);
-
-        // Run
-        var timer = try std.time.Timer.start();
-
-        while (timer.read() < nanoseconds) {
-            const count = try self.ring.consume();
-
-            if (count == 0) {
-                try self.ring.poll(10);
-            }
-        }
-    }
-
-    pub fn free(self: *Profiler) void {
+    pub fn deinit(self: *Profiler) void {
+        self.stop();
         self.allocator.free(self.links);
         self.ring.free();
         self.object.free();

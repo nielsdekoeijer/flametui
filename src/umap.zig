@@ -1,6 +1,6 @@
 const std = @import("std");
-const PID = @import("typesystem.zig").PID;
-const InstructionPointer = @import("typesystem.zig").InstructionPointer;
+const PID = @import("profile.zig").PID;
+const InstructionPointer = @import("profile.zig").InstructionPointer;
 
 /// ===================================================================================================================
 /// UMap
@@ -265,4 +265,3 @@ pub const UMapUnmanaged = struct {
         }.lessThan);
     }
 };
-

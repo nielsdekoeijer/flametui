@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const PID = @import("typesystem.zig").PID;
-const InstructionPointer = @import("typesystem.zig").InstructionPointer;
+const PID = @import("profile.zig").PID;
+const InstructionPointer = @import("profile.zig").InstructionPointer;
 
 const UMapEntry = @import("umap.zig").UMapEntry;
 const UMapCache = @import("umap.zig").UMapCache;
@@ -115,6 +115,15 @@ pub const StackTrie = struct {
             ),
             .allocator = allocator,
         };
+    }
+
+    test "init creates root node" {
+        var trie = try StackTrie.init(std.testing.allocator);
+        defer trie.deinit();
+
+        try std.testing.expectEqual(1, trie.nodes.items.len);
+        try std.testing.expectEqual(0, trie.nodes.items[StackTrie.RootId].hitCount);
+        try std.testing.expectEqual(StackTrie.RootId, trie.nodes.items[StackTrie.RootId].parent);
     }
 
     /// Adds an event to the trie
@@ -238,9 +247,76 @@ pub const StackTrie = struct {
         }
     }
 
+    test "add kernel-only event creates correct trie structure" {
+        var trie = try StackTrie.init(std.testing.allocator);
+        defer trie.deinit();
+
+        var cache = try UMapCache.init(std.testing.allocator);
+        defer cache.deinit();
+
+        const event = EventType{
+            .pid = 1,
+            .uips = &[_]u64{},
+            .kips = &[_]u64{ 0xAAAA, 0xBBBB },
+        };
+
+        try trie.add(event, &cache);
+
+        // root + 2 kernel frames
+        try std.testing.expectEqual(3, trie.nodes.items.len);
+        try std.testing.expectEqual(1, trie.nodes.items[StackTrie.RootId].hitCount);
+
+        // Deepest kernel frame (0xBBBB, added first since reversed) is child of root
+        try std.testing.expectEqual(StackTrie.RootId, trie.nodes.items[1].parent);
+        try std.testing.expectEqual(0xBBBB, trie.nodes.items[1].payload.kernel.kmapip);
+
+        // 0xAAAA is child of 0xBBBB's node
+        try std.testing.expectEqual(1, trie.nodes.items[2].parent);
+        try std.testing.expectEqual(0xAAAA, trie.nodes.items[2].payload.kernel.kmapip);
+    }
+
+    test "add duplicate kernel event increments hit counts" {
+        var trie = try StackTrie.init(std.testing.allocator);
+        defer trie.deinit();
+
+        var cache = try UMapCache.init(std.testing.allocator);
+        defer cache.deinit();
+
+        const event = EventType{
+            .pid = 1,
+            .uips = &[_]u64{},
+            .kips = &[_]u64{0xAAAA},
+        };
+
+        try trie.add(event, &cache);
+        try trie.add(event, &cache);
+
+        // Still only root + 1 kernel node (deduped)
+        try std.testing.expectEqual(2, trie.nodes.items.len);
+        try std.testing.expectEqual(2, trie.nodes.items[StackTrie.RootId].hitCount);
+        try std.testing.expectEqual(2, trie.nodes.items[1].hitCount);
+    }
+
+    test "different PIDs create distinct nodes for same IP" {
+        var trie = try StackTrie.init(std.testing.allocator);
+        defer trie.deinit();
+
+        var cache = try UMapCache.init(std.testing.allocator);
+        defer cache.deinit();
+
+        for ([_]u64{ 1, 2 }) |pid| {
+            try trie.add(.{ .pid = pid, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} }, &cache);
+        }
+
+        // root + 2 separate kernel nodes
+        try std.testing.expectEqual(3, trie.nodes.items.len);
+        try std.testing.expectEqual(2, trie.nodes.items[StackTrie.RootId].hitCount);
+    }
+
+    /// Remove all entries, but keep root node
     pub fn reset(self: *StackTrie) void {
         // We keep the root node (index 0) alive, but reset its hit count.
-        self.nodes.items.len = 1;
+        self.nodes.shrinkRetainingCapacity(1);
         self.nodes.items[RootId].hitCount = 0;
 
         // Keep allocation, but clear entries
@@ -251,7 +327,28 @@ pub const StackTrie = struct {
         self.umaps.clearRetainingCapacity();
     }
 
-    pub fn free(self: *StackTrie) void {
+    test "reset preserves root, clears everything else" {
+        var trie = try StackTrie.init(std.testing.allocator);
+        defer trie.deinit();
+
+        // Manually add a dummy node to simulate state
+        try trie.nodes.append(std.testing.allocator, .{
+            .hitCount = 5,
+            .parent = StackTrie.RootId,
+            .payload = .{ .kernel = .{ .kmapip = 0xdead } },
+        });
+
+        trie.nodes.items[StackTrie.RootId].hitCount = 10;
+
+        trie.reset();
+
+        try std.testing.expectEqual(1, trie.nodes.items.len);
+        try std.testing.expectEqual(0, trie.nodes.items[StackTrie.RootId].hitCount);
+        try std.testing.expectEqual(0, trie.nodesLookup.count());
+        try std.testing.expectEqual(0, trie.umaps.items.len);
+    }
+
+    pub fn deinit(self: *StackTrie) void {
         for (self.umaps.items) |umap| umap.deinit(self.allocator);
         self.umaps.deinit(self.allocator);
         self.nodes.deinit(self.allocator);

@@ -1,72 +1,35 @@
 const std = @import("std");
 const flametui = @import("flametui");
 
-var verbose: bool = false;
-
+/// ===================================================================================================================
+/// Logging
+/// ===================================================================================================================
+/// Pass our handle
 pub const std_options: std.Options = .{
     .logFn = logHandle,
 };
 
+/// Global to parameterize the logging
+var VerboseLogEnabled: bool = false;
+
+/// Log function
 fn logHandle(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (!verbose) return;
+    if (!VerboseLogEnabled) return;
     std.log.defaultLog(level, scope, format, args);
 }
 
-const Command = enum {
-    fixed,
-    aggregate,
-    ring,
-    file,
-};
-
-const Config = struct {
-    command: Command,
-    hz: usize = 49,
-    duration_ms: u64 = 1000,
-    ring_slots: usize = 10,
-    file_path: ?[]const u8 = null,
-
-    pub fn usage(exe_name: []const u8, writer: *std.Io.Writer) !void {
-        try writer.print(
-            \\Usage: {s} [command] [options]
-            \\
-            \\Commands:
-            \\  fixed        Run profiling for a fixed duration (default: 1000ms)
-            \\  aggregate    Run profiling indefinitely, aggregating stack traces
-            \\  ring         Run profiling with a sliding window ring buffer
-            \\  file <path>  Load and visualize a collapsed stacktrace file
-            \\
-            \\Options (fixed):
-            \\  --hz <int>   Sampling frequency in Hertz (default: 49)
-            \\  --ms <int>   Profile duration in milliseconds (default: 1000)
-            \\
-            \\Options (aggregate):
-            \\  --hz <int>   Sampling frequency in Hertz (default: 49)
-            \\
-            \\Options (ring):
-            \\  --hz <int>   Sampling frequency in Hertz (default: 49)
-            \\  --ms <int>   Size of ring slot in milliseconds (default: 50)
-            \\  --n  <int>   Number of slots in ring buffer, minimum 4 (default: 10)
-            \\
-            \\General:
-            \\  --verbose    Enable verbose logging
-            \\  -h, --help   Print this help message
-            \\
-            \\
-        , .{exe_name});
-        try writer.flush();
-    }
-};
-
+/// ===================================================================================================================
+/// Arguments
+/// ===================================================================================================================
 fn parseIntArg(comptime T: type, args: *std.process.ArgIterator, flag: []const u8, writer: *std.Io.Writer, exe_name: []const u8) T {
     const val = args.next() orelse {
         writer.print("Missing value for {s}\n", .{flag}) catch {};
-        Config.usage(exe_name, writer) catch {};
+        Options.usage(exe_name, writer) catch {};
         writer.flush() catch {};
         std.process.exit(1);
     };
@@ -79,109 +42,256 @@ fn parseIntArg(comptime T: type, args: *std.process.ArgIterator, flag: []const u
 
 fn exitWithMessage(writer: *std.Io.Writer, exe_name: []const u8, comptime fmt: []const u8, fmtargs: anytype) noreturn {
     writer.print(fmt, fmtargs) catch {};
-    Config.usage(exe_name, writer) catch {};
+    Options.usage(exe_name, writer) catch {};
     writer.flush() catch {};
     std.process.exit(1);
 }
+
+const Options = struct {
+    general: GeneralOptions,
+    command: CommandOptions,
+
+    const Command = enum {
+        fixed,
+        aggregate,
+        ring,
+        file,
+    };
+
+    const CommandOptions = union(Command) {
+        fixed: struct {
+            hz: usize = 49,
+            ms: u64 = 1000,
+        },
+        aggregate: struct {
+            hz: usize = 49,
+        },
+        ring: struct {
+            hz: usize = 49,
+            ms: u64 = 50,
+            n: u64 = 4,
+        },
+        file: struct {
+            file_path: ?[]const u8 = null,
+        },
+    };
+
+    const GeneralOptions = struct {
+        verbose: bool = false,
+        enable_idle: bool = false,
+    };
+
+    pub fn usage(exe_name: []const u8, writer: *std.Io.Writer) !void {
+        try writer.print(
+            \\Usage: {s} [command] [options]
+            \\
+            \\Commands:
+            \\  fixed          Run profiling for a fixed duration (default: 1000ms)
+            \\  aggregate      Run profiling indefinitely, aggregating stack traces
+            \\  ring           Run profiling with a sliding window ring buffer
+            \\  file           Load and visualize a collapsed stacktrace file
+            \\
+            \\Options (fixed)  :
+            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
+            \\  --ms <int>     Profile duration in milliseconds (default: 1000)
+            \\
+            \\Options (aggregate):
+            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
+            \\
+            \\Options (ring):  
+            \\  --hz <int>     Sampling frequency in Hertz (default: 49)
+            \\  --ms <int>     Size of ring slot in milliseconds (default: 50)
+            \\  --n  <int>     Number of slots in ring buffer, minimum 4 (default: 10)
+            \\
+            \\Options (path):  
+            \\  --path <str>   Path to the collapsed stack trace file
+            \\
+            \\General:
+            \\  --verbose      Enable verbose logging
+            \\  --enable-idle  While measuring, filter out idle processes (i.e. pid 0)
+            \\  -h, --help     Print this help message
+            \\
+            \\
+        , .{exe_name});
+        try writer.flush();
+    }
+
+    pub fn parse(allocator: std.mem.Allocator) Options {
+        _ = allocator;
+
+        var stderr_buf: [512]u8 = undefined;
+        var stderr = std.fs.File.stderr().writer(&stderr_buf);
+        const writer = &stderr.interface;
+
+        var args = std.process.argsWithAllocator(std.heap.page_allocator) catch {
+            writer.print("Failed to get process arguments\n", .{}) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
+        defer args.deinit();
+
+        const exe_name = args.next() orelse "flametui";
+
+        const cmd_str = args.next() orelse {
+            Options.usage(exe_name, writer) catch {};
+            std.process.exit(1);
+        };
+
+        if (std.mem.eql(u8, cmd_str, "--help") or std.mem.eql(u8, cmd_str, "-h")) {
+            Options.usage(exe_name, writer) catch {};
+            std.process.exit(0);
+        }
+
+        var general = GeneralOptions{};
+
+        if (std.mem.eql(u8, cmd_str, "fixed")) {
+            var opts: @TypeOf(@as(CommandOptions, .{ .fixed = .{} }).fixed) = .{};
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--hz")) {
+                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--ms")) {
+                    opts.ms = parseIntArg(u64, &args, "--ms", writer, exe_name);
+                } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    // handled
+                } else {
+                    exitWithMessage(writer, exe_name, "Unknown option for 'fixed': {s}\n", .{arg});
+                }
+            }
+            return .{ .general = general, .command = .{ .fixed = opts } };
+        } else if (std.mem.eql(u8, cmd_str, "aggregate")) {
+            var opts: @TypeOf(@as(CommandOptions, .{ .aggregate = .{} }).aggregate) = .{};
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--hz")) {
+                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    // handled
+                } else {
+                    exitWithMessage(writer, exe_name, "Unknown option for 'aggregate': {s}\n", .{arg});
+                }
+            }
+            return .{ .general = general, .command = .{ .aggregate = opts } };
+        } else if (std.mem.eql(u8, cmd_str, "ring")) {
+            var opts: @TypeOf(@as(CommandOptions, .{ .ring = .{} }).ring) = .{};
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--hz")) {
+                    opts.hz = parseIntArg(usize, &args, "--hz", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--ms")) {
+                    opts.ms = parseIntArg(u64, &args, "--ms", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--n")) {
+                    opts.n = parseIntArg(u64, &args, "--n", writer, exe_name);
+                    if (opts.n < 4) {
+                        exitWithMessage(writer, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{opts.n});
+                    }
+                } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    // handled
+                } else {
+                    exitWithMessage(writer, exe_name, "Unknown option for 'ring': {s}\n", .{arg});
+                }
+            }
+            return .{ .general = general, .command = .{ .ring = opts } };
+        } else if (std.mem.eql(u8, cmd_str, "file")) {
+            var opts: @TypeOf(@as(CommandOptions, .{ .file = .{} }).file) = .{};
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--path")) {
+                    opts.file_path = args.next() orelse {
+                        exitWithMessage(writer, exe_name, "Missing value for --path\n", .{});
+                    };
+                } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    // handled
+                } else if (!std.mem.startsWith(u8, arg, "-")) {
+                    opts.file_path = arg;
+                } else {
+                    exitWithMessage(writer, exe_name, "Unknown option for 'file': {s}\n", .{arg});
+                }
+            }
+            if (opts.file_path == null) {
+                exitWithMessage(writer, exe_name, "Missing file path for 'file' command\n", .{});
+            }
+            return .{ .general = general, .command = .{ .file = opts } };
+        } else {
+            exitWithMessage(writer, exe_name, "Unknown command: {s}\n", .{cmd_str});
+        }
+    }
+
+    fn parseGeneralOption(arg: []const u8, args: *std.process.ArgIterator, general: *GeneralOptions, exe_name: []const u8, writer: *std.Io.Writer) bool {
+        _ = args;
+        if (std.mem.eql(u8, arg, "--verbose")) {
+            general.verbose = true;
+            VerboseLogEnabled = true;
+            return true;
+        } else if (std.mem.eql(u8, arg, "--enable-idle")) {
+            general.enable_idle = true;
+            return true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            Options.usage(exe_name, writer) catch {};
+            std.process.exit(0);
+        }
+        return false;
+    }
+};
 
 pub fn main() !void {
     var backend = std.heap.GeneralPurposeAllocator(.{}).init;
     const allocator = backend.allocator();
 
-    var stderr_buf: [512]u8 = undefined;
-    var stderr = std.fs.File.stderr().writer(&stderr_buf);
+    const opts = Options.parse(allocator);
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
+    switch (opts.command) {
+        .fixed => |fixed| {
+            var stderr_buf: [512]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&stderr_buf);
+            requireRoot(&stderr.interface, "flametui");
 
-    const exe_name = args.next() orelse "flametui";
+            var app = try flametui.App.init(allocator);
+            defer app.free();
 
-    const cmd_str = args.next() orelse {
-        try Config.usage(exe_name, &stderr.interface);
-        std.process.exit(1);
-    };
-
-    // Handle --help / -h as first argument
-    if (std.mem.eql(u8, cmd_str, "--help") or std.mem.eql(u8, cmd_str, "-h")) {
-        try Config.usage(exe_name, &stderr.interface);
-        std.process.exit(0);
-    }
-
-    // Parse command
-    const command: Command = if (std.mem.eql(u8, cmd_str, "fixed"))
-        .fixed
-    else if (std.mem.eql(u8, cmd_str, "aggregate"))
-        .aggregate
-    else if (std.mem.eql(u8, cmd_str, "ring"))
-        .ring
-    else if (std.mem.eql(u8, cmd_str, "file"))
-        .file
-    else {
-        exitWithMessage(&stderr.interface, exe_name, "Unknown command: {s}\n", .{cmd_str});
-    };
-
-    var config = Config{ .command = command };
-
-    // Parse remaining args
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--verbose")) {
-            verbose = true;
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try Config.usage(exe_name, &stderr.interface);
-            std.process.exit(0);
-        } else if (std.mem.eql(u8, arg, "--hz")) {
-            config.hz = parseIntArg(usize, &args, "--hz", &stderr.interface, exe_name);
-        } else if (std.mem.eql(u8, arg, "--ms")) {
-            config.duration_ms = parseIntArg(u64, &args, "--ms", &stderr.interface, exe_name);
-        } else if (std.mem.eql(u8, arg, "--n")) {
-            config.ring_slots = parseIntArg(usize, &args, "--n", &stderr.interface, exe_name);
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            // Positional argument — only valid for `file` command
-            if (config.command == .file) {
-                config.file_path = arg;
+            if (opts.general.enable_idle) {
+                app.profiler.globals.enable_idle = 1;
             } else {
-                exitWithMessage(&stderr.interface, exe_name, "Unexpected argument: {s}\n", .{arg});
-            }
-        } else {
-            exitWithMessage(&stderr.interface, exe_name, "Unknown option: {s}\n", .{arg});
-        }
-    }
-
-    switch (config.command) {
-        .fixed => {
-            requireRoot(&stderr.interface, exe_name);
-
-            var app = try flametui.App.init(allocator);
-            defer app.free();
-
-            const timeout_ns = @as(u64, config.duration_ms) * std.time.ns_per_ms;
-            try app.runFixed(config.hz, timeout_ns);
-        },
-        .aggregate => {
-            requireRoot(&stderr.interface, exe_name);
-
-            var app = try flametui.App.init(allocator);
-            defer app.free();
-
-            try app.runAggregate(config.hz);
-        },
-        .ring => {
-            requireRoot(&stderr.interface, exe_name);
-
-            if (config.ring_slots < 4) {
-                exitWithMessage(&stderr.interface, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{config.ring_slots});
+                app.profiler.globals.enable_idle = 0;
             }
 
+            const timeout_ns = fixed.ms * std.time.ns_per_ms;
+            try app.runFixed(fixed.hz, timeout_ns);
+        },
+        .aggregate => |agg| {
+            var stderr_buf: [512]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&stderr_buf);
+            requireRoot(&stderr.interface, "flametui");
+
             var app = try flametui.App.init(allocator);
             defer app.free();
 
-            const slot_ns = @as(u64, config.duration_ms) * std.time.ns_per_ms;
-            try app.runRing(config.hz, slot_ns, config.ring_slots);
+            if (opts.general.enable_idle) {
+                app.profiler.globals.enable_idle = 1;
+            } else {
+                app.profiler.globals.enable_idle = 0;
+            }
+
+            try app.runAggregate(agg.hz);
         },
-        .file => {
-            const path = config.file_path orelse {
-                exitWithMessage(&stderr.interface, exe_name, "Missing file path for 'file' command\n", .{});
-            };
+        .ring => |ring| {
+            var stderr_buf: [512]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&stderr_buf);
+            requireRoot(&stderr.interface, "flametui");
+
+            var app = try flametui.App.init(allocator);
+            defer app.free();
+
+            if (opts.general.enable_idle) {
+                app.profiler.globals.enable_idle = 1;
+            } else {
+                app.profiler.globals.enable_idle = 0;
+            }
+
+            const slot_ns = ring.ms * std.time.ns_per_ms;
+            try app.runRing(ring.hz, slot_ns, ring.n);
+        },
+        .file => |file| {
+            const path = file.file_path.?;
+
+            var stderr_buf: [512]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&stderr_buf);
 
             var handle = std.fs.cwd().openFile(path, .{}) catch |err| {
                 stderr.interface.print("Could not open file '{s}': {}\n", .{ path, err }) catch {};

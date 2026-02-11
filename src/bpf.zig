@@ -61,11 +61,11 @@ pub const Object = struct {
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    /// Get the global section (.bss) as a pointer to user defined type. The pattern one would use is define a
+    /// Get the global section (.data) as a pointer to user defined type. The pattern one would use is define a
     /// structure with all known globals in the bpf program, and pass it as T.
     pub fn getGlobalSectionPointer(self: Object, comptime T: type) error{ MapNotFound, MapNotMapped, MapSizeMismatch }!*T {
-        // Get the global + static section, which is in .bss
-        const map = c.bpf_object__find_map_by_name(self.internal, ".bss") orelse return error.MapNotFound;
+        // Get the global + static section, which is in .data
+        const map = c.bpf_object__find_map_by_name(self.internal, ".data") orelse return error.MapNotFound;
 
         // Get the pointer
         var size: usize = 0;

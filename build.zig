@@ -29,6 +29,18 @@ pub fn vmlinuxGetSourceDependency(b: *std.Build) *std.Build.Dependency {
     return b.dependency("vmlinux_src", .{});
 }
 
+pub fn vmlinuxGetPlatformName(target: std.Build.ResolvedTarget) []const u8 {
+    return switch (target.result.cpu.arch) {
+        .x86_64 => "x86",
+        .aarch64 => "arm64",
+        .riscv64 => "riscv",
+        .s390x => "s390x",
+        .powerpc64le => "powerpc",
+        .loongarch64 => "loongarch",
+        else => @panic("This architecture is not supported by the vmlinux headers"),
+    };
+}
+
 pub fn ebpfAddIncludePaths(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(b.path("src/bpf"));
 }
@@ -57,20 +69,10 @@ pub fn ebpfModuleFromCSource(b: *std.Build, target: std.Build.ResolvedTarget, na
         },
     });
 
-    const arch_folder = switch (target.result.cpu.arch) {
-        .x86_64 => "x86",
-        .aarch64 => "arm64",
-        .riscv64 => "riscv",
-        .s390x => "s390x",
-        .powerpc64le => "powerpc",
-        .loongarch64 => "loongarch",
-        else => @panic("This architecture is not supported by the vmlinux headers"),
-    };
-
     prog.root_module.addIncludePath(.{
         .dependency = .{
             .dependency = vmlinuxGetSourceDependency(b),
-            .sub_path = b.fmt("include/{s}", .{arch_folder}),
+            .sub_path = b.fmt("include/{s}", .{vmlinuxGetPlatformName(target)}),
         },
     });
 
@@ -103,6 +105,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "profile_streaming", .module = profileStreamingModule },
         },
         .link_libcpp = true,
+    });
+
+    mod.addIncludePath(.{
+        .dependency = .{
+            .dependency = vmlinuxGetSourceDependency(b),
+            .sub_path = b.fmt("include/{s}", .{vmlinuxGetPlatformName(target)}),
+        },
     });
 
     ebpfAddIncludePaths(b, mod);

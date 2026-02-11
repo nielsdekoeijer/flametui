@@ -205,7 +205,7 @@ pub const App = struct {
         symbols.* = ThreadSafe(SymbolTrie).init(symboltrie);
 
         var interface = try Interface.init(allocator, symbols);
-        interface.missed = profiler.missed;
+        interface.missed = &profiler.globals.dropped_events;
 
         return App{
             .allocator = allocator,

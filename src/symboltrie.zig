@@ -4,6 +4,9 @@ const StackTrie = @import("stacktrie.zig").StackTrie;
 const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 const c = @import("cimport.zig").c;
 
+/// ===================================================================================================================
+/// Helpers
+/// ===================================================================================================================
 /// We link libcpp for this reason
 extern "c" fn __cxa_demangle(
     mangled_name: [*c]const u8,
@@ -149,6 +152,10 @@ pub const SymbolTrie = struct {
             .kmap = try KMap.init(allocator),
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
+    }
+
+    pub fn initPerfScript(allocator: std.mem.Allocator, reader: *std.Io.Reader) !SymbolTrie {
+        return initCollapsed(allocator, reader);
     }
 
     // For loading a collapsed stacktrace file

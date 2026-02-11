@@ -63,6 +63,15 @@ pub const SharedObjectMap = struct {
 
         // Get file details and mmap
         const stat = try file.stat();
+
+        if (stat.size == 0) {
+            std.log.info("Path for shared object '{s}' has size 0, returning unmapped", .{path});
+            return SharedObjectMap{
+                .internal = .{
+                    .unmapped = .{},
+                },
+            };
+        }
         const mappedSharedObject = try std.posix.mmap(
             null,
             stat.size,

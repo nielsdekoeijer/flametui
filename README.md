@@ -81,6 +81,12 @@ There are several areas where this project could be improved:
         Specific PID, run on a specified executable 
 - [ ] **Vendoring as Library**:
         Plug into build.zig to have an e.g. `zig build profile` step.
+- [ ] **Verification versus perf + flamegraph.pl**:
+        Our program SHOULD give the same result, ensure that this is true.
+- [ ] **Improved error Handling**:
+        Currently we have `UNMAPPED` as our only indication, we can be more robust.
+- [ ] **CI/CD for Release**:
+        Currently, you gotta build. This sucks, I can just vendor for all major platforms.
 
 ## AI Usage Disclaimer
 More or less all code was hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

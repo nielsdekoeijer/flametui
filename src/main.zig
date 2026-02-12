@@ -56,17 +56,17 @@ const Options = struct {
         fixed: struct {
             hz: usize = 49,
             ms: u64 = 1000,
-            pid: i32 = -1,
+            pid: ?[]i32 = null,
         },
         aggregate: struct {
             hz: usize = 49,
-            pid: i32 = -1,
+            pid: ?[]i32 = null,
         },
         ring: struct {
             hz: usize = 49,
             ms: u64 = 50,
             n: u64 = 4,
-            pid: i32 = -1,
+            pid: ?[]i32 = null,
         },
         file: struct {
             file_path: ?[]const u8 = null,
@@ -122,7 +122,13 @@ const Options = struct {
     }
 
     /// Args
-    fn parseIntArgOrExit(comptime T: type, args: *std.process.ArgIterator, flag: []const u8, writer: *std.Io.Writer, exe_name: []const u8) T {
+    fn parseIntArgOrExit(
+        comptime T: type,
+        args: *std.process.ArgIterator,
+        flag: []const u8,
+        writer: *std.Io.Writer,
+        exe_name: []const u8,
+    ) T {
         const val = args.next() orelse {
             writer.print("Missing value for {s}\n", .{flag}) catch {};
             Options.usage(exe_name, writer) catch {};
@@ -137,6 +143,42 @@ const Options = struct {
         };
     }
 
+    /// Args
+    fn parseIntSliceArgOrExit(
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        args: *std.process.ArgIterator,
+        flag: []const u8,
+        writer: *std.Io.Writer,
+        exe_name: []const u8,
+    ) []T {
+        const val = args.next() orelse {
+            writer.print("Missing value for {s}\n", .{flag}) catch {};
+            Options.usage(exe_name, writer) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
+
+        var tokens = std.mem.splitScalar(u8, val, ' ');
+        var arraylist = std.ArrayListUnmanaged(i32){};
+
+        while (tokens.next()) |token| {
+            const int = std.fmt.parseInt(T, token, 10) catch |err| {
+                writer.print("Invalid number for {s}: {s} ({})\n", .{ flag, token, err }) catch {};
+                writer.flush() catch {};
+                std.process.exit(1);
+            };
+
+            arraylist.append(allocator, int) catch |err| {
+                writer.print("Failed to parse integer list: {}\n", .{err}) catch {};
+                writer.flush() catch {};
+                std.process.exit(1);
+            };
+        }
+
+        return arraylist.items;
+    }
+
     /// Get arguments
     fn getArgumentsOrExit(writer: *std.Io.Writer) std.process.ArgIterator {
         return std.process.argsWithAllocator(std.heap.page_allocator) catch {
@@ -146,7 +188,7 @@ const Options = struct {
         };
     }
 
-    pub fn parse(writer: *std.Io.Writer) Options {
+    pub fn parse(allocator: std.mem.Allocator, writer: *std.Io.Writer) Options {
         var args = getArgumentsOrExit(writer);
         defer args.deinit();
 
@@ -181,7 +223,7 @@ const Options = struct {
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
+                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
@@ -195,7 +237,7 @@ const Options = struct {
                 if (std.mem.eql(u8, arg, "--hz")) {
                     opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
+                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
@@ -211,7 +253,7 @@ const Options = struct {
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntArgOrExit(i32, &args, "--pid", writer, exe_name);
+                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--n")) {
                     opts.n = parseIntArgOrExit(u64, &args, "--n", writer, exe_name);
                     if (opts.n < 4) {
@@ -273,9 +315,9 @@ pub fn main() !void {
     var stderr = std.fs.File.stderr().writer(&stderr_buf);
     const writer = &stderr.interface;
 
-    const opts = Options.parse(writer);
+    const opts = Options.parse(allocator, writer);
     switch (opts.command) {
-        inline .fixed, .aggregate, .ring => {
+        inline .fixed, .aggregate, .ring => |command| {
             requireRoot(writer, "flametui");
 
             var app = try flametui.App.init(allocator);
@@ -287,17 +329,30 @@ pub fn main() !void {
                 app.profiler.globals.enable_idle = 0;
             }
 
+            if (command.pid) |pid| {
+                const len = @min(32, pid.len);
+
+                for (0..len) |i| {
+                    app.profiler.globals.pids[i] = @intCast(pid[i]);
+                }
+
+                app.profiler.globals.pids_len = len;
+            } else {
+                // pid_len == 0 -> no filter
+                app.profiler.globals.pids_len = 0;
+            }
+
             switch (opts.command) {
-                .aggregate => |command| {
-                    try app.runAggregate(command.hz, command.pid);
+                .aggregate => |comm| {
+                    try app.runAggregate(comm.hz);
                 },
-                .fixed => |command| {
-                    const timeout_ns = command.ms * std.time.ns_per_ms;
-                    try app.runFixed(command.hz, command.pid, timeout_ns);
+                .fixed => |comm| {
+                    const timeout_ns = comm.ms * std.time.ns_per_ms;
+                    try app.runFixed(comm.hz, timeout_ns);
                 },
-                .ring => |command| {
-                    const slot_ns = command.ms * std.time.ns_per_ms;
-                    try app.runRing(command.hz, command.pid, slot_ns, command.n);
+                .ring => |comm| {
+                    const slot_ns = comm.ms * std.time.ns_per_ms;
+                    try app.runRing(comm.hz, slot_ns, comm.n);
                 },
                 else => unreachable,
             }

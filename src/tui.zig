@@ -362,6 +362,9 @@ pub const Interface = struct {
     infoBufSharedObjectName: [4096]u8 = std.mem.zeroes([4096]u8),
     infoSliceSharedObjectName: ?[]u8 = null,
 
+    // Pre-resever something for the title buffer
+    titleBuf: [512]u8 = std.mem.zeroes([512]u8),
+
     // Selected node id
     selectedNodeId: SymbolTrie.NodeId = SymbolTrie.RootId,
 
@@ -793,11 +796,12 @@ pub const Interface = struct {
             else => return err,
         };
 
-        var title_buf: [128]u8 = undefined;
         const title = if (self.missed) |m|
-            std.fmt.bufPrint(&title_buf, "FlameGraph (dropped: {})", .{m.*}) catch "FlameGraph"
+            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph (dropped: {})", .{m.*})
         else
             "FlameGraph";
+
+        std.log.info("title: {s}", .{title});
 
         // Draw the flamegraph box
         drawBorder(

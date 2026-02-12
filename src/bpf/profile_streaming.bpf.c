@@ -15,6 +15,8 @@ struct {
 volatile struct globals globals = {
     .dropped_events = 0,
     .enable_idle = 1,
+    .pids_len = 0,
+    .pids = {0},
 };
 
 struct {
@@ -43,6 +45,25 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
   if (pid == 0 && globals.enable_idle == 0) {
       return 0;
+  }
+
+  // pid filtering
+  __u64 pids_len = globals.pids_len;
+  if (pids_len > 32) {
+      return 0;
+  }
+
+  if (pids_len > 0) {
+      bool found = false;
+      for (__u64 i = 0; i < pids_len; i++) {
+          if (pid == globals.pids[i]) {
+              found = true;
+          }
+      }
+
+      if (!found) {
+          return 0;
+      }
   }
 
   // get scratch space

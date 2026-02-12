@@ -105,6 +105,12 @@ There are several areas where this project could be improved:
     - [ ] **Denote PIDs**: 
         I'd like to be able to see the PID of the stuff. Can be done ya?
 
+## Kernel Versions
+I have tested on strictly recent kernels. I know there are some issues, for example on RT linux. We use dynamic allocations
+to populate the eBPF ringbuffers. Dynamic allocations use spinlocks. There are some issues with the corresponding locks
+on older kernel versions. One [patch](https://github.com/torvalds/linux/commit/8b62645b09f870d70c7910e7550289d444239a46) 
+fixes this by switching to `raw_spinlock_t`, in 6.12. Before that I have observed issues...
+
 ## AI Usage Disclaimer
 Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
 and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 

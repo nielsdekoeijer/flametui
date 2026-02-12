@@ -9,15 +9,18 @@ struct {
   __uint(max_entries, 8 * 1024 * 1024); // 8MB buffer
 } events SEC(".maps");
 
-// volatile __u64 dropped_events = 0;
-// volatile __u64 enable_root = 1;
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct globals_t);
+    __uint(map_flags, BPF_F_MMAPABLE);
+} globals_map SEC(".maps");
 
-volatile struct globals globals = {
-    .dropped_events = 0,
-    .enable_idle = 1,
-    .pids_len = 0,
-    .pids = {0},
-};
+static __always_inline struct globals_t* get_globals() {
+    __u32 key = 0;
+    return bpf_map_lookup_elem(&globals_map, &key);
+}
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -42,21 +45,27 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   // get pid
   __u64 pid = bpf_get_current_pid_tgid() >> 32;
 
+  // get globals
+  struct globals_t* globals = get_globals();
+  if (!globals) {
+      return 0;
+  }
+
   // if its pid 0, thats the kernel generating kernel events like scheduling, skip 
-  if (pid == 0 && globals.enable_idle == 0) {
+  if (pid == 0 && globals->enable_idle == 0) {
       return 0;
   }
 
   // pid filtering
-  __u64 pids_len = globals.pids_len;
+  __u64 pids_len = globals->pids_len;
   if (pids_len > 32) {
       return 0;
   }
 
-  if (pids_len > 0) {
+  if (pids_len > 0 && pid != 0) {
       bool found = false;
       for (__u64 i = 0; i < pids_len; i++) {
-          if (pid == globals.pids[i]) {
+          if (pid == globals->pids[i]) {
               found = true;
           }
       }
@@ -70,14 +79,14 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   key = 0;
   __u64 *kscratch = bpf_map_lookup_elem(&scratch_kstack, &key);
   if (!kscratch) {
-    __sync_fetch_and_add(&globals.dropped_events, 1);
+    __sync_fetch_and_add(&globals->dropped_events, 1);
     return 0;
   }
 
   key = 0;
   __u64 *uscratch = bpf_map_lookup_elem(&scratch_ustack, &key);
   if (!uscratch) {
-    __sync_fetch_and_add(&globals.dropped_events, 1);
+    __sync_fetch_and_add(&globals->dropped_events, 1);
     return 0;
   }
 
@@ -105,7 +114,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   __u64 ringbufferSize = sizeof(__u64) * 3 + ustack_size + kstack_size;
   err = bpf_ringbuf_reserve_dynptr(&events,  ringbufferSize, 0, &ptr);
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
@@ -116,7 +125,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   err = bpf_dynptr_write(&ptr, offset, &pid, sizeof(pid), 0);
   offset = offset + sizeof(pid);
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
@@ -126,7 +135,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   err = bpf_dynptr_write(&ptr, offset, &ustack_size, sizeof(ustack_size), 0);
   offset = offset + sizeof(ustack_size);
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
@@ -136,7 +145,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   err = bpf_dynptr_write(&ptr, offset, &kstack_size, sizeof(kstack_size), 0);
   offset = offset + sizeof(kstack_size);
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
@@ -150,7 +159,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   err = bpf_dynptr_write(&ptr, offset, uscratch, ustack_size, 0);
   offset = offset + ustack_size;
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
@@ -164,7 +173,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   err = bpf_dynptr_write(&ptr, offset, kscratch, kstack_size, 0);
   offset = offset + kstack_size;
   if (err < 0) {
-      __sync_fetch_and_add(&globals.dropped_events, 1);
+      __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }

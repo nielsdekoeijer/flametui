@@ -92,7 +92,7 @@ pub const Profiler = struct {
     object: bpf.Object,
     links: []bpf.Object.Link,
     ring: bpf.Object.RingBuffer,
-    globals: *volatile Definitions.globals,
+    globals: *volatile Definitions.globals_t,
     running: bool = false,
 
     pub fn init(
@@ -121,7 +121,7 @@ pub const Profiler = struct {
         const ring = try object.findRingBuffer(ContextType, EventTypeRaw, handler, context, "events");
 
         // Global from the program
-        const globals = try object.getGlobalSectionPointer(Definitions.globals);
+        const globals = try object.getMapPointer("globals_map", Definitions.globals_t);
 
         return Profiler{
             .allocator = allocator,

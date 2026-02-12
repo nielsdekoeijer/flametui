@@ -30,6 +30,7 @@ const ProfilerContext = struct {
     umapCache: UMapCache,
     ring: *StackTrieRing,
 
+    /// Called on each new event, merges into existing stacktries
     pub fn callback(context: *ProfilerContext, event: *const EventTypeRaw) void {
         const now = std.time.nanoTimestamp();
 
@@ -52,7 +53,7 @@ const ProfilerContext = struct {
 /// ===================================================================================================================
 /// RingBuffer
 /// ===================================================================================================================
-/// Thread-Safe Ring Buffer, inefficient but easy to understand
+/// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand. 
 pub const StackTrieRing = struct {
     allocator: std.mem.Allocator,
     buffer: []StackTrie,

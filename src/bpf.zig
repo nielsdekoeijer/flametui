@@ -54,36 +54,42 @@ pub const Object = struct {
         return .{ .internal = internal };
     }
 
-    test "Object.load rejects invalid ELF" {
+    test "Object.init rejects invalid ELF" {
         const program = try loadProgramAligned(std.testing.allocator, "not a valid elf");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    test "Object.load rejects empty input" {
+    test "Object.init rejects empty input" {
         const program = try loadProgramAligned(std.testing.allocator, "");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    /// Get the global section (.data) as a pointer to user defined type. The pattern one would use is define a
-    /// structure with all known globals in the bpf program, and pass it as T.
-    pub fn getGlobalSectionPointer(self: Object, comptime T: type) error{ MapNotFound, MapNotMapped, MapSizeMismatch }!*volatile T {
-        // Get the global + static section, which is in .data
-        const map = c.bpf_object__find_map_by_name(self.internal, ".data") orelse return error.MapNotFound;
+    /// Get a pointer to a specific single-value BPF map. Note that the access will NOT be atomic. For my current 
+    /// purposes, we only write once on init. The missed count we read though, this could hit race condition.
+    pub fn getMapPointer(self: Object, name: [:0]const u8, comptime T: type) !*volatile T {
+        const map = c.bpf_object__find_map_by_name(self.internal, name) orelse return error.MapNotFound;
 
-        // Get the pointer
-        var size: usize = 0;
-        const ptr = c.bpf_map__initial_value(map, &size) orelse return error.MapNotMapped;
-
-        // We assert that our map is of the same size as we specify, sanity check
-        if (size != @sizeOf(T)) {
+        const value_size = c.bpf_map__value_size(map);
+        if (value_size != @sizeOf(T)) {
             return error.MapSizeMismatch;
         }
 
-        // Cast to user type
+        const fd = c.bpf_map__fd(map);
+        if (fd < 0) return error.MapNotMapped;
+
+        const ptr = try std.posix.mmap(
+            null,
+            @sizeOf(T),
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+
         return @as(*volatile T, @ptrCast(@alignCast(ptr)));
     }
 

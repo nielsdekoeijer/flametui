@@ -801,8 +801,6 @@ pub const Interface = struct {
         else
             "FlameGraph";
 
-        std.log.info("title: {s}", .{title});
-
         // Draw the flamegraph box
         drawBorder(
             title,

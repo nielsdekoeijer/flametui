@@ -17,6 +17,8 @@ It looks cool though!
 I hope to keep the motivation to keep pushing it forward, trying to be somewhat neat in the versioning.
 Currently, it is in a dodgy state, so we are still in **ALPHA**. 
 
+**Please checkout a tag if you want a stable version, main regularly breaking**
+
 ## Usage
 
 As `vaxis` pins `0.15.1`, this is the required version. Note that we supply a flake.nix such that you can use my 
@@ -35,6 +37,9 @@ sudo zig-out/bin/flametui aggregate --hz 49
 
 # Sliding window — keeps the last N time slots, evicts oldest
 sudo zig-out/bin/flametui ring --hz 49 --ms 50 --n 10
+
+# Profile specific Process IDs (space separated string)
+sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)"
 ```
 
 If you dont want to use my profiler (I must admit it is janky), you can also try doing something like:

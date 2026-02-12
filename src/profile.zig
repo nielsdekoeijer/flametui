@@ -135,7 +135,9 @@ pub const Profiler = struct {
 
     /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
     /// the connection.
-    pub fn start(self: *Profiler, rate: usize, pid: i32) !void {
+    pub fn start(self: *Profiler, rate: usize) !void {
+        const pid = -1;
+
         // Open perf events
         std.log.info("Starting perf event with rate {} and pid {}", .{rate, pid});
         var attributes = std.os.linux.perf_event_attr{

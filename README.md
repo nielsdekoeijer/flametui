@@ -97,7 +97,10 @@ There are several areas where this project could be improved:
         entries.
 - [ ] **Resolve Binary Name**:
         Currently, I dont grab the binary / proc name! That's a major bug, can just solve that.
-
+    - [ ] **Resolve TIDs**: 
+        I think it'd be interesting to denote the tids as well as the pids somehow. Maybe ought to be a toggle
+    - [ ] **Denote PIDs**: 
+        I'd like to be able to see the PID of the stuff. Can be done ya?
 ## AI Usage Disclaimer
 Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
 and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 

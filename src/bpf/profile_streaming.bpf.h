@@ -2,7 +2,7 @@
 
 #define MAX_STACK_DEPTH 128
 
-struct globals {
+struct globals_t {
     __u64 dropped_events;
     __u64 enable_idle; 
     __u64 pids[32];

@@ -95,12 +95,16 @@ There are several areas where this project could be improved:
 - [ ] **Increase ring accuracy**:
         In theory, we can timestamp events and make ring 100% accurate. Now we have a dodgy timer and roulette the 
         entries.
+    - [ ] **Update even on no events**: 
+        Currently, when we get no events the picture just freezes. Ideally, we hook into the timing logic to run the 
+        loop anyway even if we have no events! E.g. emitting a null event or so.
 - [ ] **Resolve Binary Name**:
         Currently, I dont grab the binary / proc name! That's a major bug, can just solve that.
     - [ ] **Resolve TIDs**: 
         I think it'd be interesting to denote the tids as well as the pids somehow. Maybe ought to be a toggle
     - [ ] **Denote PIDs**: 
         I'd like to be able to see the PID of the stuff. Can be done ya?
+
 ## AI Usage Disclaimer
 Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
 and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 

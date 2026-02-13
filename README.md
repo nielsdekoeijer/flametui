@@ -79,6 +79,7 @@ Before `0.0.2-alpha`:
     - [ ] src/tui.zig  
     - [ ] src/umap.zig  
 - [ ] Implement `perf script | flametui`.
+- [ ] Fix Bug in Navigation: Navigation is a hack, doesn't work well. Review and fix
 
 There are several areas where this project could be improved:
 

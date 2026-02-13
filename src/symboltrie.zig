@@ -135,12 +135,12 @@ pub const SymbolTrie = struct {
     allocator: std.mem.Allocator,
 
     /// Kernel maps, assumed static
-    kmap: ?KMap,
+    kmap: ?*KMap,
 
     /// For loading dlls
     sharedObjectMapCache: SharedObjectMapCache,
 
-    pub fn init(allocator: std.mem.Allocator) !SymbolTrie {
+    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMap) !SymbolTrie {
         return SymbolTrie{
             .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024),
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
@@ -149,13 +149,13 @@ pub const SymbolTrie = struct {
                 &[_]NodeId{},
             ),
             .allocator = allocator,
-            .kmap = try KMap.init(allocator),
+            .kmap = kmap,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
     }
 
     pub fn initPerfScript(allocator: std.mem.Allocator, reader: *std.Io.Reader) !SymbolTrie {
-        return initCollapsed(allocator, reader);
+        return try initCollapsed(allocator, reader);
     }
 
     // For loading a collapsed stacktrace file
@@ -171,6 +171,7 @@ pub const SymbolTrie = struct {
             .kmap = null,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
         };
+        errdefer self.deinit();
 
         // GIGA JANK we gotta find a better way
         if (self.nodes.items.len == 0) {
@@ -180,47 +181,34 @@ pub const SymbolTrie = struct {
                 .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
                 .payload = .{ .root = .{ .symbol = try self.allocator.dupe(u8, "root") } },
             });
-
             const rootKey = Key{ .parent = RootId, .symbolHash = hashSymbol("root") };
             try self.nodesLookup.put(self.allocator, rootKey, RootId);
         }
-
         while (true) {
             // Take line by line
             const line = reader.takeDelimiterExclusive('\n') catch break;
-
             // Remove unexpected characters
             const trimmed = std.mem.trim(u8, line, "\r\t ");
             if (trimmed.len == 0) {
                 continue;
             }
-
-            // Extract the count
-            const count = blk: {
-                var spaceIter = std.mem.tokenizeAny(u8, trimmed, " ");
-
-                var countStr: []const u8 = undefined;
-                while (spaceIter.next()) |str| {
-                    countStr = str;
-                }
-
-                break :blk std.fmt.parseInt(u64, countStr, 10) catch return error.CollapsedParseFailure;
-            };
+            // Split into stack part and count part on the last space
+            const lastSpace = std.mem.lastIndexOfScalar(u8, trimmed, ' ') orelse return error.CollapsedParseFailure;
+            const stackPart = trimmed[0..lastSpace];
+            const countStr = std.mem.trim(u8, trimmed[lastSpace + 1 ..], " ");
+            const count = std.fmt.parseInt(u64, countStr, 10) catch return error.CollapsedParseFailure;
 
             // Increment root
             self.nodes.items[RootId].hitCount += count;
-
-            // Get all the entries
-            var colonIter = std.mem.tokenizeAny(u8, trimmed, ";");
+            // Get all the entries — only tokenize the stack part, not the count
+            var colonIter = std.mem.tokenizeAny(u8, stackPart, ";");
             var parentId = RootId;
-
             // For now, we just treat everything as though its a user
             while (colonIter.next()) |symbol| {
                 const key = Key{
                     .parent = parentId,
                     .symbolHash = hashSymbol(symbol),
                 };
-
                 const found = self.nodesLookup.get(key);
                 if (found) |symbolId| {
                     // Hit! Add the total hitcount
@@ -229,7 +217,7 @@ pub const SymbolTrie = struct {
                 } else {
                     // Miss! Create the node and append
                     try self.nodes.append(self.allocator, TrieNode{
-                        // Add the stack items hit ount
+                        // Add the stack items hit count
                         .hitCount = count,
                         .parent = parentId,
                         .payload = .{
@@ -242,22 +230,18 @@ pub const SymbolTrie = struct {
                         },
                         .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
                     });
-
                     // Compute the new node id
                     const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
                     try self.nodesLookup.put(self.allocator, key, nodeId);
-
                     // Go to parent, and add self as child
                     if (nodeId != parentId) {
                         try self.nodes.items[parentId].children.append(self.allocator, nodeId);
                     }
-
                     // Update, new parent
                     parentId = nodeId;
                 }
             }
         }
-
         return self;
     }
 
@@ -265,8 +249,8 @@ pub const SymbolTrie = struct {
         const input = "main;foo;bar 10\nmain;foo;baz 5\n";
         var reader = std.Io.Reader.fixed(input);
 
-        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
-        defer trie.free();
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
 
         // root + main + foo + bar + baz = 5 nodes
         try std.testing.expectEqual(5, trie.nodes.items.len);
@@ -276,8 +260,8 @@ pub const SymbolTrie = struct {
     test "initCollapsed handles empty input" {
         var reader = std.Io.Reader.fixed("");
 
-        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
-        defer trie.free();
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
 
         try std.testing.expectEqual(1, trie.nodes.items.len); // just root
     }
@@ -286,10 +270,95 @@ pub const SymbolTrie = struct {
         const input = "\n\nmain;foo 3\n\n";
         var reader = std.Io.Reader.fixed(input);
 
-        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader.interface);
-        defer trie.free();
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
 
         try std.testing.expectEqual(3, trie.nodes.items.len); // root + main + foo
+    }
+
+    pub fn exportCollapsed(self: *const SymbolTrie, writer: anytype) !void {
+        // Path buffer: stack of symbol indices from root to current node
+        var path: [256]NodeId = undefined;
+
+        for (self.nodes.items, 0..) |node, i| {
+            const id: NodeId = @intCast(i);
+
+            // Only emit leaf nodes (no children) with hits
+            if (node.children.items.len != 0 or node.hitCount == 0) continue;
+            if (id == RootId) continue;
+
+            // Walk up to root to build the path
+            var depth: usize = 0;
+            var curr = id;
+            while (curr != RootId) {
+                if (depth >= path.len) return error.StackTooDeep;
+                path[depth] = curr;
+                depth += 1;
+                curr = self.nodes.items[curr].parent;
+            }
+
+            // Write symbols root-to-leaf (reverse of what we collected)
+            var j = depth;
+            while (j > 0) {
+                j -= 1;
+                const symbol = switch (self.nodes.items[path[j]].payload) {
+                    inline else => |s| s.symbol,
+                };
+                try writer.writeAll(symbol);
+                if (j > 0) try writer.writeAll(";");
+            }
+
+            // Write the hit count
+            try writer.print(" {}\n", .{node.hitCount});
+        }
+    }
+
+    test "exportCollapsed round-trips with initCollapsed" {
+        const input = "main;foo;bar 10\nmain;foo;baz 5\nmain;qux 3\n";
+        var reader = std.Io.Reader.fixed(input);
+
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
+
+        // Export to buffer
+        var buf: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buf);
+        try trie.exportCollapsed(stream.writer());
+        const exported = stream.getWritten();
+
+        // Re-parse the exported output
+        var reader2 = std.Io.Reader.fixed(exported);
+        var trie2 = try SymbolTrie.initCollapsed(std.testing.allocator, &reader2);
+        defer trie2.deinit();
+
+        // Same structure: root + main + foo + bar + baz + qux = 6 nodes
+        try std.testing.expectEqual(trie.nodes.items.len, trie2.nodes.items.len);
+        try std.testing.expectEqual(trie.nodes.items[SymbolTrie.RootId].hitCount, trie2.nodes.items[SymbolTrie.RootId].hitCount);
+    }
+
+    test "exportCollapsed emits nothing for empty trie" {
+        var reader = std.Io.Reader.fixed("");
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
+
+        var buf: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buf);
+        try trie.exportCollapsed(stream.writer());
+
+        try std.testing.expectEqual(0, stream.getWritten().len);
+    }
+
+    test "exportCollapsed single stack" {
+        const input = "a;b;c 7\n";
+        var reader = std.Io.Reader.fixed(input);
+        var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
+        defer trie.deinit();
+
+        var buf: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buf);
+        try trie.exportCollapsed(stream.writer());
+
+        try std.testing.expectEqualStrings("a;b;c 7\n", stream.getWritten());
     }
 
     /// Our hashing function
@@ -439,11 +508,9 @@ pub const SymbolTrie = struct {
                 },
             }
         }
+
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);
-        if (self.kmap) |*kmap| {
-            kmap.deinit();
-        }
         self.sharedObjectMapCache.deinit();
     }
 };

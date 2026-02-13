@@ -145,12 +145,7 @@ pub const StackTrie = struct {
             const ip = event.uips[i];
 
             // Build key
-            const key = Key{
-                .kind = .user,
-                .pid = pid,
-                .parent = parent,
-                .ip = ip,
-            };
+            const key = Key{ .kind = .user, .pid = pid, .parent = parent, .ip = ip };
 
             // Check if key exists
             const found = self.nodesLookup.get(key);
@@ -166,6 +161,7 @@ pub const StackTrie = struct {
                 const item: UMapEntry = switch (umap.find(ip)) {
                     // If the entry exists in the map, great, clone it
                     .found => |it| try it.clone(self.allocator),
+
                     // Else return a fixed map
                     .notfound, .unmapped => try UMapUnmanaged.UMapEntryUnmapped.clone(self.allocator),
                 };
@@ -208,12 +204,7 @@ pub const StackTrie = struct {
             const ip = event.kips[j];
 
             // Build the key
-            const key = Key{
-                .kind = .kernel,
-                .pid = pid,
-                .parent = parent,
-                .ip = ip,
-            };
+            const key = Key{ .kind = .kernel, .pid = pid, .parent = parent, .ip = ip };
 
             // Check if key exists
             const found = self.nodesLookup.get(key);
@@ -256,6 +247,8 @@ pub const StackTrie = struct {
 
         const event = EventType{
             .pid = 1,
+            .tid = 0,
+            .timestamp = 0,
             .uips = &[_]u64{},
             .kips = &[_]u64{ 0xAAAA, 0xBBBB },
         };
@@ -284,6 +277,8 @@ pub const StackTrie = struct {
 
         const event = EventType{
             .pid = 1,
+            .tid = 0,
+            .timestamp = 0,
             .uips = &[_]u64{},
             .kips = &[_]u64{0xAAAA},
         };
@@ -305,7 +300,7 @@ pub const StackTrie = struct {
         defer cache.deinit();
 
         for ([_]u64{ 1, 2 }) |pid| {
-            try trie.add(.{ .pid = pid, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} }, &cache);
+            try trie.add(.{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} }, &cache);
         }
 
         // root + 2 separate kernel nodes
@@ -323,7 +318,7 @@ pub const StackTrie = struct {
         self.nodesLookup.clearRetainingCapacity();
 
         // Keep allocation, but clear entries
-        for (self.umaps.items) |entry| entry.deinit(self.allocator);
+        for (self.umaps.items) |*entry| entry.deinit(self.allocator);
         self.umaps.clearRetainingCapacity();
     }
 
@@ -349,7 +344,7 @@ pub const StackTrie = struct {
     }
 
     pub fn deinit(self: *StackTrie) void {
-        for (self.umaps.items) |umap| umap.deinit(self.allocator);
+        for (self.umaps.items) |*umap| umap.deinit(self.allocator);
         self.umaps.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);

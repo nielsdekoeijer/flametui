@@ -9,7 +9,7 @@ const PID = @import("profile.zig").PID;
 const UMapEntry = @import("umap.zig").UMapEntry;
 const UMapCache = @import("umap.zig").UMapCache;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
-const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
+const KMap = @import("kmap.zig").KMap;
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 const StackTrie = @import("stacktrie.zig").StackTrie;
 const EventType = @import("profile.zig").EventType;
@@ -20,20 +20,37 @@ const Interface = @import("tui.zig").Interface;
 const ThreadSafe = @import("lock.zig").ThreadSafe;
 
 /// ===================================================================================================================
-/// Callbacks
+/// Callback Contexts
 /// ===================================================================================================================
-const ProfilerContext = struct {
-    bin_start_ns: ?u64,     
-    bin_duration_ns: u64,  
+const RingProfilerContext = struct {
+    bin_start_ns: ?u64,
+    bin_duration_ns: u64,
     iptrie: *StackTrie,
     umapCache: UMapCache,
     ring: *StackTrieRing,
 
-    pub fn callback(context: *ProfilerContext, event: *const EventTypeRaw) void {
+    pub fn init(allocator: std.mem.Allocator, ring: *StackTrieRing) !RingProfilerContext {
+        return .{
+            .ring = ring,
+            .iptrie = &ring.stacktries[0],
+            .umapCache = try UMapCache.init(allocator),
+            .bin_start_ns = null,
+            .bin_duration_ns = 100 * std.time.ns_per_ms,
+        };
+    }
+
+    pub fn deinit(self: *RingProfilerContext) void {
+        self.umapCache.deinit();
+
+        // invalidate
+        defer self.* = undefined;
+    }
+
+    pub fn callback(context: *RingProfilerContext, event: *const EventTypeRaw) void {
         const parsed = EventType.init(event);
 
         if (context.bin_start_ns) |*bin_start_ns| {
-            if (parsed.timestamp >= bin_start_ns.* + context.bin_duration_ns) {
+            if (parsed.timestamp >= bin_start_ns.* +| context.bin_duration_ns) {
                 const elapsed = parsed.timestamp - bin_start_ns.*;
                 const bins_elapsed = elapsed / context.bin_duration_ns;
 
@@ -45,9 +62,11 @@ const ProfilerContext = struct {
                 }
             }
         } else {
+            // Populate if not yet defined
             context.bin_start_ns = parsed.timestamp;
         }
 
+        // Cannot throw, so panic on error
         context.iptrie.add(parsed, &context.umapCache) catch {
             @panic("Could not add to stacktrie");
         };
@@ -55,33 +74,36 @@ const ProfilerContext = struct {
 };
 
 /// ===================================================================================================================
-/// RingBuffer
+/// StackRingBuffer
 /// ===================================================================================================================
 /// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand.
 pub const StackTrieRing = struct {
     allocator: std.mem.Allocator,
-    buffer: []StackTrie,
+    stacktries: []StackTrie,
     mutex: std.Thread.Mutex,
 
     // Currently written by ebpf program
     writerHead: usize,
 
-    // Newest sample, writerHead - 1, should be merged in symboltrie
+    // Newest sample, eventually writerHead - 1, should be merged in symboltrie
     readerHead: usize,
 
-    // Oldest sample, writerHead + 1, should be evicted in symboltrie
+    // Oldest sample, writerHead + 1, should be evicted from symboltrie
     readerTail: usize,
 
-    /// Initialize the ring with allocated, empty StackTries
+    /// Initialize the ring with an empty StackTrie list
     pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieRing {
-        const buffer = try allocator.alloc(StackTrie, n);
-        for (buffer) |*item| {
-            item.* = try StackTrie.init(allocator);
+        const stacktries = try allocator.alloc(StackTrie, n);
+        errdefer allocator.free(stacktries);
+
+        for (stacktries, 0..) |*stacktrie, i| {
+            errdefer for (0..i) |j| stacktries[j].deinit();
+            stacktrie.* = try StackTrie.init(allocator);
         }
 
         return StackTrieRing{
             .allocator = allocator,
-            .buffer = buffer,
+            .stacktries = stacktries,
             .mutex = .{},
             .writerHead = 0,
             .readerHead = n - 1,
@@ -89,13 +111,27 @@ pub const StackTrieRing = struct {
         };
     }
 
+    /// Atomic deinit + invalidate
+    pub fn deinit(self: *StackTrieRing, allocator: std.mem.Allocator) void {
+        self.mutex.lock();
+
+        for (self.stacktries) |*stacktrie| {
+            stacktrie.deinit();
+        }
+
+        allocator.free(self.stacktries);
+
+        self.mutex.unlock();
+        self.* = undefined;
+    }
+
     // Returns the next head, or null if it would exceed the readerTail. If null, the eBPF program simply keeps
-    // writing to the same "bucket", i.e. stacktrace. Assumptions about time become more dodgy, but things keep working.
+    // writing to the same "bucket", i.e. stacktrace.
     pub fn progressWriterHead(self: *StackTrieRing) ?*StackTrie {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const nextSlot = (self.writerHead + 1) % self.buffer.len;
+        const nextSlot = (self.writerHead + 1) % self.stacktries.len;
 
         // Always as close to readerTail as possible, but never overtake
         if (nextSlot == self.readerTail) {
@@ -103,11 +139,7 @@ pub const StackTrieRing = struct {
         }
 
         self.writerHead = nextSlot;
-        std.log.info(
-            "Progressing writer head. Reader head: {}, Reader tail: {}, Writer head: {}",
-            .{ self.readerHead, self.readerTail, self.writerHead },
-        );
-        return &self.buffer[self.writerHead];
+        return &self.stacktries[self.writerHead];
     }
 
     // Returns the next reader head, aka the newest stacktrie. Nominally, this should be 1 behind the writer head.
@@ -116,26 +148,23 @@ pub const StackTrieRing = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const nextSlot = (self.readerHead + 1) % self.buffer.len;
+        const nextSlot = (self.readerHead + 1) % self.stacktries.len;
 
         // Always as close to writerHead as possible, but never overtage
         if (nextSlot == self.writerHead) {
             return null;
         }
 
-        return &self.buffer[nextSlot];
+        return &self.stacktries[nextSlot];
     }
 
+    // Pushes reader head one forward
     pub fn advanceReaderHead(self: *StackTrieRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const nextSlot = (self.readerHead + 1) % self.buffer.len;
+        const nextSlot = (self.readerHead + 1) % self.stacktries.len;
         self.readerHead = nextSlot;
-        std.log.info(
-            "Progressing reader head. Reader head: {}, Reader tail: {}, Writer head: {}",
-            .{ self.readerHead, self.readerTail, self.writerHead },
-        );
     }
 
     // Returns the next tail,
@@ -144,32 +173,74 @@ pub const StackTrieRing = struct {
         defer self.mutex.unlock();
 
         // Should be always 1 ahead of writer (thats the oldest), so if next is the slot beyond that null
-        if (self.readerTail == (self.writerHead + 1) % self.buffer.len) {
-            return &self.buffer[self.readerTail];
+        if (self.readerTail == (self.writerHead + 1) % self.stacktries.len) {
+            return &self.stacktries[self.readerTail];
         }
 
         return null;
     }
 
+    // Pushes reader tail one forward
     pub fn advanceReaderTail(self: *StackTrieRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const nextSlot = (self.readerTail + 1) % self.buffer.len;
+        const nextSlot = (self.readerTail + 1) % self.stacktries.len;
         self.readerTail = nextSlot;
+    }
+};
 
-        std.log.info(
-            "Progressing reader tail. Reader head: {}, Reader tail: {}, Writer head: {}",
-            .{ self.readerHead, self.readerTail, self.writerHead },
-        );
+/// ===================================================================================================================
+/// SymbolTrieList
+/// ===================================================================================================================
+pub const SymbolTrieList = struct {
+    list: ThreadSafe([]*SymbolTrie),
+    kmap: ?*KMap,
+
+    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMap, size: usize) !SymbolTrieList {
+        const symboltrieSlice = try allocator.alloc(*SymbolTrie, size);
+        errdefer allocator.free(symboltrieSlice);
+
+        for (0..size) |i| {
+            errdefer {
+                for (0..i) |j| {
+                    symboltrieSlice[j].deinit();
+                    allocator.destroy(symboltrieSlice[j]);
+                }
+            }
+
+            symboltrieSlice[i] = try allocator.create(SymbolTrie);
+            errdefer allocator.destroy(symboltrieSlice[i]);
+
+            symboltrieSlice[i].* = try SymbolTrie.init(allocator, kmap);
+            errdefer symboltrieSlice[i].deinit();
+        }
+
+        const list = try allocator.create([]*SymbolTrie);
+        errdefer allocator.destroy(list);
+        list.* = symboltrieSlice;
+
+        return .{
+            .list = ThreadSafe([]*SymbolTrie).init(list),
+            .kmap = kmap,
+        };
     }
 
-    pub fn deinit(self: *StackTrieRing, allocator: std.mem.Allocator) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn deinit(self: *SymbolTrieList, allocator: std.mem.Allocator) void {
+        {
+            const list = self.list.lock();
+            defer self.list.unlock();
 
-        for (self.buffer) |*ptr| ptr.deinit();
-        allocator.free(self.buffer);
+            for (list.*) |symboltrie| {
+                symboltrie.deinit();
+                allocator.destroy(symboltrie);
+            }
+
+            allocator.free(list.*);
+            allocator.destroy(list);
+        }
+
+        self.* = undefined;
     }
 };
 
@@ -178,82 +249,120 @@ pub const StackTrieRing = struct {
 /// ===================================================================================================================
 pub const App = struct {
     allocator: std.mem.Allocator,
-    profiler: Profiler,
-    context: *ProfilerContext,
+
+    /// Ringbuffer that contains stack tries
     ring: *StackTrieRing,
-    bpfThread: ?std.Thread = null,
-    tuiThread: ?std.Thread = null,
-    symbols: *ThreadSafe([]*SymbolTrie),
-    shouldQuit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    /// Context for running our profiler
+    context: *RingProfilerContext,
+
+    /// eBPF profiler program
+    profiler: Profiler,
+
+    /// Thread for handling eBPF callbacks
+    bpfThread: ?std.Thread,
+
+    /// Thread for handling tui interactions
+    tuiThread: ?std.Thread,
+
+    /// KMap for symboltries
+    kmap: *KMap,
+
+    /// SymbolTries we make available for drawing
+    symbols: *SymbolTrieList,
+
+    /// Should stop our TUI
+    shouldQuit: std.atomic.Value(bool),
+
+    /// Our TUI
     interface: Interface,
 
     pub fn init(allocator: std.mem.Allocator, bins: usize) anyerror!App {
+        // init ringbuffer pointer
         const ring = try allocator.create(StackTrieRing);
         ring.* = try StackTrieRing.init(allocator, 16);
+        errdefer ring.deinit(allocator);
 
-        const context = try allocator.create(ProfilerContext);
+        // init profiler context pointer
+        const context = try allocator.create(RingProfilerContext);
+        context.* = try RingProfilerContext.init(allocator, ring);
+        errdefer context.deinit();
 
-        context.* = .{
-            .ring = ring,
-            .iptrie = &ring.buffer[0],
-            .umapCache = try UMapCache.init(allocator),
-            .bin_start_ns = null,
-            .bin_duration_ns = 100 * std.time.ns_per_ms,
-        };
+        // init profiler
+        var profiler = try Profiler.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
+        errdefer profiler.deinit();
 
-        const profiler = try Profiler.init(ProfilerContext, ProfilerContext.callback, allocator, context);
+        // init kmap
+        const kmap = try allocator.create(KMap);
+        kmap.* = try KMap.init(allocator);
+        errdefer kmap.deinit();
 
-        const symboltrie_slice = try allocator.alloc(*SymbolTrie, bins);
-        for (0..bins) |i| {
-            const symboltrie = try allocator.create(SymbolTrie);
-            symboltrie.* = try SymbolTrie.init(allocator);
-            symboltrie_slice[i] = symboltrie;
-        }
+        // init symbol list
+        const symbols = try allocator.create(SymbolTrieList);
+        symbols.* = try SymbolTrieList.init(allocator, kmap, bins);
+        errdefer symbols.deinit();
 
-        const slice_holder = try allocator.create([]*SymbolTrie);
-        slice_holder.* = symboltrie_slice;
-
-        const symbols = try allocator.create(ThreadSafe([]*SymbolTrie));
-        symbols.* = ThreadSafe([]*SymbolTrie).init(slice_holder);
-
+        // init tui
         var interface = try Interface.init(allocator, symbols);
         interface.missed = &profiler.globals.dropped_events;
+        errdefer interface.deinit();
 
         return App{
             .allocator = allocator,
-            .interface = interface,
-            .profiler = profiler,
-            .context = context,
-            .symbols = symbols,
             .ring = ring,
+            .context = context,
+            .profiler = profiler,
+            .kmap = kmap,
+            .symbols = symbols,
+            .interface = interface,
+            .bpfThread = null,
+            .tuiThread = null,
+            .shouldQuit = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *App) void {
-        self.shouldQuit.store(true, .release);
-        if (self.bpfThread) |t| t.join();
-        if (self.tuiThread) |t| t.join();
+        self.stop();
+
+        self.symbols.deinit(self.allocator);
+        self.allocator.destroy(self.symbols);
+
+        self.kmap.deinit();
+        self.allocator.destroy(self.kmap);
 
         self.profiler.deinit();
-        self.context.umapCache.deinit();
-        self.allocator.destroy(self.context);
 
-        {
-            const syms = self.symbols.lock();
-            for (syms.*) |s| {
-                s.deinit();
-                self.allocator.destroy(s);
-            }
-            self.allocator.free(syms.*);
-            self.symbols.unlock();
-        }
-        self.allocator.destroy(self.symbols.data);
-        self.allocator.destroy(self.symbols);
+        self.context.deinit();
+        self.allocator.destroy(self.context);
 
         self.ring.deinit(self.allocator);
         self.allocator.destroy(self.ring);
     }
 
+    /// Start running the application
+    fn start(self: *App, rate: usize) !void {
+        self.shouldQuit.store(false, .release);
+        errdefer self.stop();
+
+        if (self.bpfThread != null) return error.ThreadAlreadyRunning;
+        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+
+        if (self.tuiThread != null) return error.ThreadAlreadyRunning;
+        self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+    }
+
+    /// Stop the application from running by joining threads
+    fn stop(self: *App) void {
+        self.shouldQuit.store(true, .release);
+
+        if (self.bpfThread) |t| t.join();
+        self.bpfThread = null;
+
+        if (self.tuiThread) |t| t.join();
+        self.tuiThread = null;
+    }
+
+    /// Worker thread, draining bpf events
     fn bpfWorker(self: *App, rate: usize) void {
         self.profiler.start(rate) catch {
             @panic("Could not start profiler");
@@ -271,6 +380,7 @@ pub const App = struct {
         self.profiler.stop();
     }
 
+    /// Manages the tui
     fn tuiWorker(self: *App) void {
         self.interface.start() catch {
             @panic("Could not start TUI");
@@ -279,42 +389,10 @@ pub const App = struct {
         self.shouldQuit.store(true, .monotonic);
     }
 
-    pub fn tick(self: *App) !void {
-        var shouldRedraw = false;
-        if (self.ring.peekReaderTail()) |stack_trie| {
-            const symbols = self.symbols.lock().*[0];
-            defer self.symbols.unlock();
-
-            try symbols.map(stack_trie.*, .evict);
-            stack_trie.reset();
-
-            self.ring.advanceReaderTail();
-
-            shouldRedraw = true;
-        }
-
-        while (self.ring.peekReaderHead()) |stack_trie| {
-            const symbols = self.symbols.lock().*[0];
-            defer self.symbols.unlock();
-
-            try symbols.map(stack_trie.*, .merge);
-
-            self.ring.advanceReaderHead();
-
-            shouldRedraw = true;
-        }
-
-        if (self.interface.loop) |*loop| {
-            if (shouldRedraw) {
-                loop.postEvent(.{ .redraw = {} });
-            }
-        }
-    }
-
     /// Fixed duration measurement. Profile, then display the result. No streaming.
     pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
-        const symbols_list = self.symbols.lock().*;
-        self.symbols.unlock();
+        const symbols_list = self.symbols.list.lock().*;
+        self.symbols.list.unlock();
 
         const num_bins = symbols_list.len;
 
@@ -324,7 +402,7 @@ pub const App = struct {
             self.ring.deinit(self.allocator);
             self.ring.* = try StackTrieRing.init(self.allocator, num_bins);
             self.context.ring = self.ring;
-            self.context.iptrie = &self.ring.buffer[0];
+            self.context.iptrie = &self.ring.stacktries[0];
             self.context.bin_duration_ns = bin_ns;
 
             // Neuter the ring protocol so progressWriterHead never blocks.
@@ -348,8 +426,8 @@ pub const App = struct {
 
             // Map ring slot i -> symbol trie i
             for (0..num_bins) |i| {
-                if (self.ring.buffer[i].nodes.items[StackTrie.RootId].hitCount > 0) {
-                    try symbols_list[i].map(self.ring.buffer[i], .merge);
+                if (self.ring.stacktries[i].nodes.items[StackTrie.RootId].hitCount > 0) {
+                    try symbols_list[i].map(self.ring.stacktries[i], .merge);
                 }
             }
         } else {
@@ -367,9 +445,9 @@ pub const App = struct {
             }
 
             {
-                const symbols = self.symbols.lock().*[0];
-                defer self.symbols.unlock();
-                try symbols.map(self.ring.buffer[0], .merge);
+                const symbols = self.symbols.list.lock().*[0];
+                defer self.symbols.list.unlock();
+                try symbols.map(self.ring.stacktries[0], .merge);
             }
         }
 
@@ -381,13 +459,34 @@ pub const App = struct {
         // Rotate the ring, but never evict old data
         self.context.bin_duration_ns = 50 * std.time.ns_per_ms;
 
-        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
-        self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+        try self.start(rate);
 
         const merge_interval = 16 * std.time.ns_per_ms;
 
         while (!self.shouldQuit.load(.acquire)) {
-            try self.tickMergeOnly();
+            var shouldRedraw = false;
+
+            while (self.ring.peekReaderHead()) |stack_trie| {
+                const symbols = self.symbols.list.lock().*[0];
+                defer self.symbols.list.unlock();
+
+                try symbols.map(stack_trie.*, .merge);
+
+                self.ring.advanceReaderHead();
+                shouldRedraw = true;
+            }
+
+            while (self.ring.peekReaderTail()) |stack_trie| {
+                stack_trie.reset();
+                self.ring.advanceReaderTail();
+            }
+
+            if (self.interface.loop) |*loop| {
+                if (shouldRedraw) {
+                    loop.postEvent(.{ .redraw = {} });
+                }
+            }
+
             std.Thread.sleep(merge_interval);
         }
     }
@@ -398,44 +497,46 @@ pub const App = struct {
         self.ring.deinit(self.allocator);
         self.ring.* = try StackTrieRing.init(self.allocator, ring_slots);
         self.context.ring = self.ring;
-        self.context.iptrie = &self.ring.buffer[0];
+        self.context.iptrie = &self.ring.stacktries[0];
 
         self.context.bin_duration_ns = slot_ns;
 
-        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
-        self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+        try self.start(rate);
 
         const merge_interval = 16 * std.time.ns_per_ms;
 
         while (!self.shouldQuit.load(.acquire)) {
-            try self.tick();
-            std.Thread.sleep(merge_interval);
-        }
-    }
+            var shouldRedraw = false;
+            if (self.ring.peekReaderTail()) |stack_trie| {
+                const symbols = self.symbols.list.lock().*[0];
+                defer self.symbols.list.unlock();
 
-    /// Merge only, no eviction. Used by aggregate mode.
-    fn tickMergeOnly(self: *App) !void {
-        var shouldRedraw = false;
+                try symbols.map(stack_trie.*, .evict);
+                stack_trie.reset();
 
-        while (self.ring.peekReaderHead()) |stack_trie| {
-            const symbols = self.symbols.lock().*[0];
-            defer self.symbols.unlock();
+                self.ring.advanceReaderTail();
 
-            try symbols.map(stack_trie.*, .merge);
-
-            self.ring.advanceReaderHead();
-            shouldRedraw = true;
-        }
-
-        while (self.ring.peekReaderTail()) |stack_trie| {
-            stack_trie.reset();
-            self.ring.advanceReaderTail();
-        }
-
-        if (self.interface.loop) |*loop| {
-            if (shouldRedraw) {
-                loop.postEvent(.{ .redraw = {} });
+                shouldRedraw = true;
             }
+
+            while (self.ring.peekReaderHead()) |stack_trie| {
+                const symbols = self.symbols.list.lock().*[0];
+                defer self.symbols.list.unlock();
+
+                try symbols.map(stack_trie.*, .merge);
+
+                self.ring.advanceReaderHead();
+
+                shouldRedraw = true;
+            }
+
+            if (self.interface.loop) |*loop| {
+                if (shouldRedraw) {
+                    loop.postEvent(.{ .redraw = {} });
+                }
+            }
+
+            std.Thread.sleep(merge_interval);
         }
     }
 };

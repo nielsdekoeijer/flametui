@@ -56,6 +56,12 @@ pub const KMap = struct {
         };
     }
 
+    pub fn deinit(self: *KMap) void {
+        self.arena.deinit();
+
+        self.* = undefined;
+    }
+
     /// Find an entry given an instruction pointer
     pub fn find(self: KMap, ip: InstructionPointer) error{KMapEntryLookupFailure}!KMapEntry {
         // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
@@ -92,10 +98,6 @@ pub const KMap = struct {
         try std.testing.expectEqualStrings("b", (try kmap.find(250)).symbol);
         try std.testing.expectEqualStrings("c", (try kmap.find(350)).symbol);
         try std.testing.expectError(error.KMapEntryLookupFailure, kmap.find(50));
-    }
-
-    pub fn deinit(self: *KMap) void {
-        self.arena.deinit();
     }
 
     // Helper function that populates the map

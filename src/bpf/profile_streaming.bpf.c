@@ -38,12 +38,16 @@ struct {
 
 SEC("perf_event")
 int do_sample(struct bpf_perf_event_data *ctx) {
+  // grab timestamp
+  __u64 timestamp = bpf_ktime_get_ns();
+
   // dynamic pointer
   struct bpf_dynptr ptr;
   __u32 key;
 
   // get pid
-  __u64 pid = bpf_get_current_pid_tgid() >> 32;
+  __u64 tgid = bpf_get_current_pid_tgid();
+  __u64 pid = tgid >> 32;
 
   // get globals
   struct globals_t* globals = get_globals();
@@ -111,7 +115,7 @@ int do_sample(struct bpf_perf_event_data *ctx) {
   }
 
   long err;
-  __u64 ringbufferSize = sizeof(__u64) * 3 + ustack_size + kstack_size;
+  __u64 ringbufferSize = sizeof(__u64) * 4 + ustack_size + kstack_size;
   err = bpf_ringbuf_reserve_dynptr(&events,  ringbufferSize, 0, &ptr);
   if (err < 0) {
       __sync_fetch_and_add(&globals->dropped_events, 1);
@@ -121,15 +125,23 @@ int do_sample(struct bpf_perf_event_data *ctx) {
 
   __u64 offset = 0;
 
-  // add our pid
-  err = bpf_dynptr_write(&ptr, offset, &pid, sizeof(pid), 0);
-  offset = offset + sizeof(pid);
+  // add our tgid
+  err = bpf_dynptr_write(&ptr, offset, &tgid, sizeof(tgid), 0);
+  offset = offset + sizeof(tgid);
   if (err < 0) {
       __sync_fetch_and_add(&globals->dropped_events, 1);
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
 
+  // add our timestamp
+  err = bpf_dynptr_write(&ptr, offset, &timestamp, sizeof(timestamp), 0);
+  offset = offset + sizeof(timestamp);
+  if (err < 0) {
+      __sync_fetch_and_add(&globals->dropped_events, 1);
+      bpf_ringbuf_discard_dynptr(&ptr, 0);
+      return 0;
+  }
   
   // share the size of our ustack
   err = bpf_dynptr_write(&ptr, offset, &ustack_size, sizeof(ustack_size), 0);
@@ -139,7 +151,6 @@ int do_sample(struct bpf_perf_event_data *ctx) {
       bpf_ringbuf_discard_dynptr(&ptr, 0);
       return 0;
   }
-
 
   // share the size of our kstack
   err = bpf_dynptr_write(&ptr, offset, &kstack_size, sizeof(kstack_size), 0);

@@ -27,19 +27,23 @@ pub const EventTypeRaw = u64;
 /// ```
 pub const EventType = struct {
     pid: u64,
+    tid: u64,
+    timestamp: u64,
     kips: []const u64,
     uips: []const u64,
 
     // We parse from a raw pointer
     pub fn init(raw: *const EventTypeRaw) EventType {
         const ev = @as([*]const u64, @ptrCast(raw));
-        const us = ev[1] / 8;
-        const ks = ev[2] / 8;
+        const us = ev[2] / 8;
+        const ks = ev[3] / 8;
 
         const event = EventType{
-            .pid = ev[0],
-            .uips = ev[3 .. 3 + us],
-            .kips = ev[3 + us .. 3 + us + ks],
+            .pid = ev[0] >> 32,
+            .tid = ev[0] & 0xFFFFFFFF,
+            .timestamp = ev[1],
+            .uips = ev[4 .. 4 + us],
+            .kips = ev[4 + us .. 4 + us + ks],
         };
 
         return event;
@@ -139,7 +143,7 @@ pub const Profiler = struct {
         const pid = -1;
 
         // Open perf events
-        std.log.info("Starting perf event with rate {} and pid {}", .{rate, pid});
+        std.log.info("Starting perf event with rate {} and pid {}", .{ rate, pid });
         var attributes = std.os.linux.perf_event_attr{
             .type = .SOFTWARE,
             .sample_period_or_freq = rate,
@@ -166,7 +170,7 @@ pub const Profiler = struct {
 
             self.links[i] = program.attachPerfEvent(fd) catch |err| {
                 for (0..i) |j| self.links[j].free();
-                std.posix.close(fd); 
+                std.posix.close(fd);
                 return err;
             };
         }

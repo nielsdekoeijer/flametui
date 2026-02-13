@@ -376,21 +376,26 @@ pub const Interface = struct {
     allocator: std.mem.Allocator,
 
     // We want the interface to be able to dynamically swap symbols tries in order to allow for updates, likely
-    // with some triple buffering setup
-    symbols: *ThreadSafe(SymbolTrie),
+    // with some triple buffering setup. We store a list to let a user swap through various bins
+    symbols: *ThreadSafe([]*SymbolTrie),
+
+    // Active index for symbol
+    symbolActive: usize = 0,
+
+    // Total symbols
+    symbolTotal: usize = 0,
 
     /// Loop handle
     loop: ?vaxis.Loop(VaxisEvent) = null,
 
     /// Missed (maybe)
-    missed: ?*volatile const u64 = null,
+    missed: ?*const volatile u64 = null,
 
     // Bare-bones init
-    pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe(SymbolTrie)) !Interface {
-        return Interface{
-            .allocator = allocator,
-            .symbols = symbols,
-        };
+    pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe([]*SymbolTrie)) !Interface {
+        const syms = symbols.lock();
+        defer symbols.unlock();
+        return Interface{ .allocator = allocator, .symbols = symbols, .symbolTotal = syms.len };
     }
 
     // Start drawing + event loop
@@ -438,9 +443,6 @@ pub const Interface = struct {
         tui_loop: while (true) {
             var event = self.loop.?.nextEvent();
 
-            const symbols = self.symbols.lock();
-            defer self.symbols.unlock();
-
             var mouse: ?vaxis.Mouse = null;
 
             event_loop: while (true) {
@@ -462,6 +464,8 @@ pub const Interface = struct {
                         // UP (k, w, Arrow Up)
                         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches('w', .{})) {
                             if (self.highlightedNodeId) |*id| {
+                                const symbols = self.symbols.lock().*[self.symbolActive];
+                                defer self.symbols.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .north);
                             } else {
                                 self.highlightedNodeId = SymbolTrie.RootId;
@@ -471,6 +475,8 @@ pub const Interface = struct {
                         // DOWN (j, s, Arrow Down)
                         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches('s', .{})) {
                             if (self.highlightedNodeId) |*id| {
+                                const symbols = self.symbols.lock().*[self.symbolActive];
+                                defer self.symbols.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .south);
                             }
                         }
@@ -478,6 +484,8 @@ pub const Interface = struct {
                         // RIGHT (l, d, Arrow Right)
                         if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches('d', .{})) {
                             if (self.highlightedNodeId) |*id| {
+                                const symbols = self.symbols.lock().*[self.symbolActive];
+                                defer self.symbols.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .east);
                             }
                         }
@@ -485,8 +493,29 @@ pub const Interface = struct {
                         // LEFT (h, a, Arrow Left)
                         if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{}) or key.matches('a', .{})) {
                             if (self.highlightedNodeId) |*id| {
+                                const symbols = self.symbols.lock().*[self.symbolActive];
+                                defer self.symbols.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .west);
                             }
+                        }
+
+                        // SEEK FORWARD: ]
+                        if (key.matches(']', .{})) {
+                            self.symbolActive = @mod(self.symbolActive +| 1, self.symbolTotal);
+                            self.selectedNodeId = SymbolTrie.RootId;
+                            self.highlightedNodeId = null;
+                        }
+
+                        // SEEK BACKWARD: [
+                        if (key.matches('[', .{})) {
+                            if (self.symbolActive == 0) {
+                                self.symbolActive = self.symbolTotal - 1;
+                            } else {
+                                self.symbolActive -= 1;
+                            }
+                            std.log.info("{} {}", .{self.symbolActive, self.symbolTotal});
+                            self.selectedNodeId = SymbolTrie.RootId;
+                            self.highlightedNodeId = null;
                         }
 
                         if (key.matches(vaxis.Key.enter, .{})) {
@@ -523,6 +552,9 @@ pub const Interface = struct {
                 self.infoSliceHitCountPercentages = null;
                 self.infoSliceSymbol = null;
                 self.infoSliceSharedObjectName = null;
+
+                const symbols = self.symbols.lock().*[self.symbolActive];
+                defer self.symbols.unlock();
 
                 const win = vx.window();
                 try self.draw(symbols.nodes.items, win, mouse);
@@ -797,9 +829,9 @@ pub const Interface = struct {
         };
 
         const title = if (self.missed) |m|
-            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph (dropped: {})", .{m.*})
+            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph [{}/{}] (dropped: {})", .{ self.symbolActive + 1, self.symbolTotal, m.* })
         else
-            "FlameGraph";
+            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph [{}/{}]", .{ self.symbolActive + 1, self.symbolTotal });
 
         // Draw the flamegraph box
         drawBorder(

@@ -57,6 +57,7 @@ const Options = struct {
             hz: usize = 49,
             ms: u64 = 1000,
             pid: ?[]i32 = null,
+            bins: ?u64 = null,
         },
         aggregate: struct {
             hz: usize = 49,
@@ -85,19 +86,20 @@ const Options = struct {
             \\  file           Load and visualize a collapsed stacktrace file
             \\
             \\Options (fixed): 
-            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
-            \\  --ms  <int>    (optional) Profile duration in milliseconds (default: 1000)
-            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --ms   <int>    (optional) Profile duration in milliseconds (default: 1000)
+            \\  --bins <int>    (optional) Size of bins in milliseconds (default: 1 big bin)
+            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (aggregate):
-            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
-            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (ring):  
-            \\  --hz  <int>    (optional) Sampling frequency in Hertz (default: 49)
-            \\  --ms  <int>    (optional) Size of ring slot in milliseconds (default: 50)
-            \\  --n   <int>    (optional) Number of slots in ring buffer, minimum 4 (default: 10)
-            \\  --pid <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
+            \\  --ms   <int>    (optional) Size of ring slot in milliseconds (default: 50)
+            \\  --n    <int>    (optional) Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (path):  
             \\  --path <str>   (required) Path to the collapsed stack trace file
@@ -222,6 +224,8 @@ const Options = struct {
                     opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--bins")) {
+                    opts.bins = parseIntArgOrExit(u64, &args, "--bins", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
                     opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
@@ -290,7 +294,13 @@ const Options = struct {
         }
     }
 
-    fn parseGeneralOption(arg: []const u8, args: *std.process.ArgIterator, general: *GeneralOptions, exe_name: []const u8, writer: *std.Io.Writer) bool {
+    fn parseGeneralOption(
+        arg: []const u8,
+        args: *std.process.ArgIterator,
+        general: *GeneralOptions,
+        exe_name: []const u8,
+        writer: *std.Io.Writer,
+    ) bool {
         _ = args;
         if (std.mem.eql(u8, arg, "--verbose")) {
             general.verbose = true;
@@ -309,6 +319,12 @@ const Options = struct {
 
 pub fn main() !void {
     var backend = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer {
+        const check = backend.deinit();
+        if (check == .leak) {
+            std.debug.print("Memory leak detected!\n", .{});
+        }
+    }
     const allocator = backend.allocator();
 
     var stderr_buf: [512]u8 = undefined;
@@ -320,8 +336,21 @@ pub fn main() !void {
         inline .fixed, .aggregate, .ring => |command| {
             requireRoot(writer, "flametui");
 
-            var app = try flametui.App.init(allocator);
-            defer app.free();
+            var app = blk: {
+                switch (opts.command) {
+                    inline .fixed => |comm| {
+                        if (comm.bins) |bin_ms| {
+                            const num_bins = (comm.ms + bin_ms) / bin_ms - 1;
+                            break :blk try flametui.App.init(allocator, num_bins);
+                        }
+
+                        break :blk try flametui.App.init(allocator, 1);
+                    },
+                    inline else => break :blk try flametui.App.init(allocator, 1),
+                }
+            };
+
+            defer app.deinit();
 
             if (opts.general.enable_idle) {
                 app.profiler.globals.enable_idle = 1;
@@ -374,11 +403,12 @@ pub fn main() !void {
 
             const symboltrie = try allocator.create(flametui.SymbolTrie);
             symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
-            defer symboltrie.deinit();
-            defer allocator.destroy(symboltrie);
+            var symboltries = try std.ArrayListUnmanaged(*flametui.SymbolTrie).initCapacity(allocator, 1);
+            try symboltries.append(allocator, symboltrie);
+            const symbols = try allocator.create(flametui.ThreadSafe([]*flametui.SymbolTrie));
+            symbols.* = flametui.ThreadSafe([]*flametui.SymbolTrie).init(&symboltries.items);
 
-            var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);
-            var interface = try flametui.Interface.init(allocator, &symbols);
+            var interface = try flametui.Interface.init(allocator, symbols);
             try interface.start();
         },
         .stdin => {
@@ -389,11 +419,12 @@ pub fn main() !void {
 
             const symboltrie = try allocator.create(flametui.SymbolTrie);
             symboltrie.* = try flametui.SymbolTrie.initPerfScript(allocator, &stdin.interface);
-            defer symboltrie.deinit();
-            defer allocator.destroy(symboltrie);
+            var symboltries = try std.ArrayListUnmanaged(*flametui.SymbolTrie).initCapacity(allocator, 1);
+            try symboltries.append(allocator, symboltrie);
+            const symbols = try allocator.create(flametui.ThreadSafe([]*flametui.SymbolTrie));
+            symbols.* = flametui.ThreadSafe([]*flametui.SymbolTrie).init(&symboltries.items);
 
-            var symbols = flametui.ThreadSafe(flametui.SymbolTrie).init(symboltrie);
-            var interface = try flametui.Interface.init(allocator, &symbols);
+            var interface = try flametui.Interface.init(allocator, symbols);
             try interface.start();
         },
     }

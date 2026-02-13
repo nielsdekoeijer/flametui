@@ -38,7 +38,7 @@ sudo zig-out/bin/flametui aggregate --hz 49
 # Sliding window — keeps the last N time slots, evicts oldest
 sudo zig-out/bin/flametui ring --hz 49 --ms 50 --n 10
 
-# Profile specific Process IDs (space separated string)
+# Profile specific Process IDs (space separated string). These's pids are filtered inside of the eBPF program!
 sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)"
 ```
 
@@ -61,8 +61,6 @@ Note that you can **click on the nodes** to expand the view! You can also naviga
 
 All profiling commands also accept `--verbose` for debug logging and `--enable-idle` to include idle (pid 0) samples.
 
-*Note: Profiling requires root privileges...!*
-
 ## Future Roadmap / Ideas
 
 There are several areas where this project could be improved:
@@ -72,6 +70,8 @@ There are several areas where this project could be improved:
         Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
 - [ ] **Help Menu**: 
         To see what the keybindings are. Not important currently, cause I dont have keybindings.
+- [ ] **Sorting**: 
+        Either by name (idiomatic flamegraphs) or by hitcount.
 - [ ] **Lifecycle Improvements**: 
         PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
         our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
@@ -82,8 +82,6 @@ There are several areas where this project could be improved:
     - [ ] mode=offcpu, mode=cpu, etc. CLI arguments
 - [ ] **More Flamegraphs!!**: 
         I'm sure I can cook harder now that I have the basics down
-- [ ] **Filtering**:
-        Specific PID, run on a specified executable 
 - [ ] **Vendoring as Library**:
         Plug into build.zig to have an e.g. `zig build profile` step.
 - [ ] **Verification versus perf + flamegraph.pl**:
@@ -104,12 +102,15 @@ There are several areas where this project could be improved:
         I think it'd be interesting to denote the tids as well as the pids somehow. Maybe ought to be a toggle
     - [ ] **Denote PIDs**: 
         I'd like to be able to see the PID of the stuff. Can be done ya?
+- [ ] **Improve rendering**:
+        Currently, the drawing works. However, it fully redraws recursively each time. Thats OK, but probably not needed.
+        This causes the rendering to take a boat load of time.
 
 ## Kernel Versions
 I have tested on strictly recent kernels. I know there are some issues, for example on RT linux. We use dynamic allocations
 to populate the eBPF ringbuffers. Dynamic allocations use spinlocks. There are some issues with the corresponding locks
 on older kernel versions. One [patch](https://github.com/torvalds/linux/commit/8b62645b09f870d70c7910e7550289d444239a46) 
-fixes this by switching to `raw_spinlock_t`, in 6.12. Before that I have observed issues...
+fixes this by switching to `raw_spinlock_t`, in 6.12. Before that, a `spinlock_t` is used. Consequently 
 
 ## AI Usage Disclaimer
 Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,

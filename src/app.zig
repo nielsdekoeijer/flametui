@@ -22,28 +22,32 @@ const ThreadSafe = @import("lock.zig").ThreadSafe;
 /// ===================================================================================================================
 /// Callbacks
 /// ===================================================================================================================
-/// Profiler ringbuffer callback
 const ProfilerContext = struct {
-    timestamp: i128,
-    timeout: u64,
+    bin_start_ns: ?u64,     
+    bin_duration_ns: u64,  
     iptrie: *StackTrie,
     umapCache: UMapCache,
     ring: *StackTrieRing,
 
-    /// Called on each new event, merges into existing stacktries
     pub fn callback(context: *ProfilerContext, event: *const EventTypeRaw) void {
-        const now = std.time.nanoTimestamp();
+        const parsed = EventType.init(event);
 
-        if (now - context.timestamp > context.timeout) {
-            if (context.ring.progressWriterHead()) |new| {
-                context.iptrie = new;
-                context.iptrie.reset();
+        if (context.bin_start_ns) |*bin_start_ns| {
+            if (parsed.timestamp >= bin_start_ns.* + context.bin_duration_ns) {
+                const elapsed = parsed.timestamp - bin_start_ns.*;
+                const bins_elapsed = elapsed / context.bin_duration_ns;
+
+                bin_start_ns.* += bins_elapsed * context.bin_duration_ns;
+
+                if (context.ring.progressWriterHead()) |new| {
+                    context.iptrie = new;
+                    context.iptrie.reset();
+                }
             }
-
-            context.timestamp = now;
+        } else {
+            context.bin_start_ns = parsed.timestamp;
         }
 
-        const parsed = EventType.init(event);
         context.iptrie.add(parsed, &context.umapCache) catch {
             @panic("Could not add to stacktrie");
         };
@@ -53,7 +57,7 @@ const ProfilerContext = struct {
 /// ===================================================================================================================
 /// RingBuffer
 /// ===================================================================================================================
-/// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand. 
+/// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand.
 pub const StackTrieRing = struct {
     allocator: std.mem.Allocator,
     buffer: []StackTrie,
@@ -179,11 +183,11 @@ pub const App = struct {
     ring: *StackTrieRing,
     bpfThread: ?std.Thread = null,
     tuiThread: ?std.Thread = null,
-    symbols: *ThreadSafe(SymbolTrie),
+    symbols: *ThreadSafe([]*SymbolTrie),
     shouldQuit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     interface: Interface,
 
-    pub fn init(allocator: std.mem.Allocator) anyerror!App {
+    pub fn init(allocator: std.mem.Allocator, bins: usize) anyerror!App {
         const ring = try allocator.create(StackTrieRing);
         ring.* = try StackTrieRing.init(allocator, 16);
 
@@ -193,17 +197,24 @@ pub const App = struct {
             .ring = ring,
             .iptrie = &ring.buffer[0],
             .umapCache = try UMapCache.init(allocator),
-            .timestamp = std.time.nanoTimestamp(),
-            .timeout = 100 * std.time.ns_per_ms,
+            .bin_start_ns = null,
+            .bin_duration_ns = 100 * std.time.ns_per_ms,
         };
 
         const profiler = try Profiler.init(ProfilerContext, ProfilerContext.callback, allocator, context);
 
-        const symboltrie = try allocator.create(SymbolTrie);
-        symboltrie.* = try SymbolTrie.init(allocator);
+        const symboltrie_slice = try allocator.alloc(*SymbolTrie, bins);
+        for (0..bins) |i| {
+            const symboltrie = try allocator.create(SymbolTrie);
+            symboltrie.* = try SymbolTrie.init(allocator);
+            symboltrie_slice[i] = symboltrie;
+        }
 
-        const symbols = try allocator.create(ThreadSafe(SymbolTrie));
-        symbols.* = ThreadSafe(SymbolTrie).init(symboltrie);
+        const slice_holder = try allocator.create([]*SymbolTrie);
+        slice_holder.* = symboltrie_slice;
+
+        const symbols = try allocator.create(ThreadSafe([]*SymbolTrie));
+        symbols.* = ThreadSafe([]*SymbolTrie).init(slice_holder);
 
         var interface = try Interface.init(allocator, symbols);
         interface.missed = &profiler.globals.dropped_events;
@@ -218,7 +229,7 @@ pub const App = struct {
         };
     }
 
-    pub fn free(self: *App) void {
+    pub fn deinit(self: *App) void {
         self.shouldQuit.store(true, .release);
         if (self.bpfThread) |t| t.join();
         if (self.tuiThread) |t| t.join();
@@ -227,11 +238,17 @@ pub const App = struct {
         self.context.umapCache.deinit();
         self.allocator.destroy(self.context);
 
-        const syms = self.symbols.lock();
-        syms.deinit();
-        self.symbols.unlock();
+        {
+            const syms = self.symbols.lock();
+            for (syms.*) |s| {
+                s.deinit();
+                self.allocator.destroy(s);
+            }
+            self.allocator.free(syms.*);
+            self.symbols.unlock();
+        }
+        self.allocator.destroy(self.symbols.data);
         self.allocator.destroy(self.symbols);
-        self.allocator.destroy(syms);
 
         self.ring.deinit(self.allocator);
         self.allocator.destroy(self.ring);
@@ -265,7 +282,7 @@ pub const App = struct {
     pub fn tick(self: *App) !void {
         var shouldRedraw = false;
         if (self.ring.peekReaderTail()) |stack_trie| {
-            const symbols = self.symbols.lock();
+            const symbols = self.symbols.lock().*[0];
             defer self.symbols.unlock();
 
             try symbols.map(stack_trie.*, .evict);
@@ -277,7 +294,7 @@ pub const App = struct {
         }
 
         while (self.ring.peekReaderHead()) |stack_trie| {
-            const symbols = self.symbols.lock();
+            const symbols = self.symbols.lock().*[0];
             defer self.symbols.unlock();
 
             try symbols.map(stack_trie.*, .merge);
@@ -296,36 +313,73 @@ pub const App = struct {
 
     /// Fixed duration measurement. Profile, then display the result. No streaming.
     pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
-        // No ring rotation — everything goes into one StackTrie
-        self.context.timeout = std.math.maxInt(u64);
+        const symbols_list = self.symbols.lock().*;
+        self.symbols.unlock();
 
-        // Profile on this thread, blocking
-        try self.profiler.start(rate);
-        defer self.profiler.stop();
+        const num_bins = symbols_list.len;
 
-        var timer = try std.time.Timer.start();
-        while (timer.read() < timeout_ns) {
-            const count = try self.profiler.ring.consume();
-            if (count == 0) {
-                try self.profiler.ring.poll(10);
+        if (num_bins > 1) {
+            const bin_ns = timeout_ns / num_bins;
+
+            self.ring.deinit(self.allocator);
+            self.ring.* = try StackTrieRing.init(self.allocator, num_bins);
+            self.context.ring = self.ring;
+            self.context.iptrie = &self.ring.buffer[0];
+            self.context.bin_duration_ns = bin_ns;
+
+            // Neuter the ring protocol so progressWriterHead never blocks.
+            // TODO: probably make a thing that just uses a list rather than the existing ring
+            self.ring.writerHead = 0;
+            self.ring.readerHead = 0;
+            self.ring.readerTail = 0;
+
+            try self.profiler.start(rate);
+            defer self.profiler.stop();
+
+            var timer = try std.time.Timer.start();
+
+            while (timer.read() < timeout_ns) {
+                const count = try self.profiler.ring.consume();
+
+                if (count == 0) {
+                    try self.profiler.ring.poll(10);
+                }
+            }
+
+            // Map ring slot i -> symbol trie i
+            for (0..num_bins) |i| {
+                if (self.ring.buffer[i].nodes.items[StackTrie.RootId].hitCount > 0) {
+                    try symbols_list[i].map(self.ring.buffer[i], .merge);
+                }
+            }
+        } else {
+            self.context.bin_duration_ns = std.math.maxInt(u64);
+
+            try self.profiler.start(rate);
+            defer self.profiler.stop();
+
+            var timer = try std.time.Timer.start();
+            while (timer.read() < timeout_ns) {
+                const count = try self.profiler.ring.consume();
+                if (count == 0) {
+                    try self.profiler.ring.poll(10);
+                }
+            }
+
+            {
+                const symbols = self.symbols.lock().*[0];
+                defer self.symbols.unlock();
+                try symbols.map(self.ring.buffer[0], .merge);
             }
         }
 
-        // Merge the single StackTrie into symbols
-        {
-            const symbols = self.symbols.lock();
-            defer self.symbols.unlock();
-            try symbols.map(self.ring.buffer[0], .merge);
-        }
-
-        // Show the TUI (blocks until user quits)
         try self.interface.start();
     }
 
     /// Aggregate indefinitely. Streams results to TUI, never evicts.
     pub fn runAggregate(self: *App, rate: usize) anyerror!void {
         // Rotate the ring, but never evict old data
-        self.context.timeout = 50 * std.time.ns_per_ms;
+        self.context.bin_duration_ns = 50 * std.time.ns_per_ms;
 
         self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
         self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
@@ -346,7 +400,7 @@ pub const App = struct {
         self.context.ring = self.ring;
         self.context.iptrie = &self.ring.buffer[0];
 
-        self.context.timeout = slot_ns;
+        self.context.bin_duration_ns = slot_ns;
 
         self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
         self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
@@ -364,7 +418,7 @@ pub const App = struct {
         var shouldRedraw = false;
 
         while (self.ring.peekReaderHead()) |stack_trie| {
-            const symbols = self.symbols.lock();
+            const symbols = self.symbols.lock().*[0];
             defer self.symbols.unlock();
 
             try symbols.map(stack_trie.*, .merge);

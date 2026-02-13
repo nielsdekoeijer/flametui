@@ -6,10 +6,10 @@ const InstructionPointer = @import("profile.zig").InstructionPointer;
 /// UMap
 /// ===================================================================================================================
 /// UMaps are expensive to load and also can be invalidated, thus we have a cache. This class is a map between PID
-/// and UMap. 
+/// and UMap.
 ///
-/// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be 
-/// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to 
+/// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be
+/// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to
 /// trigger a reload.
 pub const UMapCache = struct {
     backend: std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged),
@@ -57,6 +57,8 @@ pub const UMapCache = struct {
     pub fn deinit(self: *UMapCache) void {
         for (self.backend.values()) |*item| item.deinit(self.allocator);
         self.backend.deinit(self.allocator);
+
+        self.* = undefined;
     }
 };
 
@@ -78,8 +80,28 @@ pub const UMapEntry = struct {
         return copy;
     }
 
-    pub fn deinit(self: UMapEntry, allocator: std.mem.Allocator) void { 
+    test "UMapEntry.clone produces independent copy" {
+        const original = UMapEntry{
+            .path = "original",
+            .offset = 0x1000,
+            .addressBeg = 0xA000,
+            .addressEnd = 0xB000,
+        };
+
+        var cloned = try original.clone(std.testing.allocator);
+        defer cloned.deinit(std.testing.allocator);
+
+        try std.testing.expectEqualStrings("original", cloned.path);
+        try std.testing.expectEqual(0x1000, cloned.offset);
+
+        // Ensure it's a different allocation
+        try std.testing.expect(cloned.path.ptr != original.path.ptr);
+    }
+
+    pub fn deinit(self: *UMapEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+
+        self.* = undefined;
     }
 };
 
@@ -165,7 +187,20 @@ pub const UMapUnmanaged = struct {
         };
     }
 
-    /// Find an entry given an instruction pointer. 
+    /// Destructor
+    pub fn deinit(self: *UMapUnmanaged, allocator: std.mem.Allocator) void {
+        switch (self.internal) {
+            .loaded => |*s| {
+                for (s.backend.items) |item| allocator.free(item.path);
+                s.backend.deinit(allocator);
+            },
+            else => {},
+        }
+
+        self.* = undefined;
+    }
+
+    /// Find an entry given an instruction pointer.
     pub fn find(self: UMapUnmanaged, ip: InstructionPointer) UMapEntryResult {
         switch (self.internal) {
             .loaded => |s| {
@@ -179,7 +214,7 @@ pub const UMapUnmanaged = struct {
                 }.lessThan);
 
                 // Ensure sane output
-                if (index == s.backend.items.len or index == 0) return .{ .notfound = .{} };
+                if (index == 0) return .{ .notfound = .{} };
                 if (s.backend.items[index - 1].addressEnd < ip) return .{ .notfound = .{} };
                 return .{ .found = s.backend.items[index - 1] };
             },
@@ -191,14 +226,62 @@ pub const UMapUnmanaged = struct {
         }
     }
 
-    /// Destructor
-    pub fn deinit(self: *UMapUnmanaged, allocator: std.mem.Allocator) void {
-        switch (self.internal) {
-            .loaded => |*s| {
-                for (s.backend.items) |item| allocator.free(item.path);
-                s.backend.deinit(allocator);
-            },
-            else => {},
+    test "UMapUnmanaged.find returns correct entry for IP in range" {
+        var backend = std.ArrayListUnmanaged(UMapEntry){};
+        defer {
+            for (backend.items) |item| std.testing.allocator.free(item.path);
+            backend.deinit(std.testing.allocator);
+        }
+
+        try backend.append(std.testing.allocator, .{
+            .addressBeg = 0x1000,
+            .addressEnd = 0x2000,
+            .offset = 0,
+            .path = try std.testing.allocator.dupe(u8, "/lib/a.so"),
+        });
+        try backend.append(std.testing.allocator, .{
+            .addressBeg = 0x3000,
+            .addressEnd = 0x4000,
+            .offset = 0x100,
+            .path = try std.testing.allocator.dupe(u8, "/lib/b.so"),
+        });
+
+        const umap = UMapUnmanaged{
+            .internal = .{ .loaded = .{ .backend = backend } },
+        };
+
+        switch (umap.find(0x1500)) {
+            .found => |entry| try std.testing.expectEqual(0x1000, entry.addressBeg),
+            else => return error.TestUnexpectedResult,
+        }
+
+        switch (umap.find(0x3500)) {
+            .found => |entry| try std.testing.expectEqual(0x3000, entry.addressBeg),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    test "UMapUnmanaged.find returns notfound for IP in gap between ranges" {
+        var backend = std.ArrayListUnmanaged(UMapEntry){};
+        defer {
+            for (backend.items) |item| std.testing.allocator.free(item.path);
+            backend.deinit(std.testing.allocator);
+        }
+
+        try backend.append(std.testing.allocator, .{
+            .addressBeg = 0x1000,
+            .addressEnd = 0x2000,
+            .offset = 0,
+            .path = try std.testing.allocator.dupe(u8, "/lib/a.so"),
+        });
+
+        const umap = UMapUnmanaged{
+            .internal = .{ .loaded = .{ .backend = backend } },
+        };
+
+        switch (umap.find(0x2500)) {
+            .notfound => {},
+            else => return error.TestUnexpectedResult,
         }
     }
 
@@ -246,13 +329,45 @@ pub const UMapUnmanaged = struct {
             // Take dll path
             const dll_path = line_iter.rest();
 
+            const owned_path = try allocator.dupe(u8, dll_path);
+            errdefer allocator.free(owned_path);
             try backend.append(allocator, .{
                 .addressBeg = map_beg,
                 .addressEnd = map_end,
                 .offset = offset,
-                .path = try allocator.dupe(u8, dll_path),
+                .path = owned_path,
             });
         }
+    }
+
+    test "UMapUnmanaged.populate parses valid /proc/pid/maps lines" {
+        const input =
+            "7f6687c76000-7f6687c77000 rw-p 00003000 103:02 19296183                   /usr/lib/libc.so.6\n" ++
+            "7f6687c77000-7f6687c79000 r--p 00000000 103:02 19553864                   /usr/lib/ld-linux.so\n";
+
+        var backend = std.ArrayListUnmanaged(UMapEntry){};
+        defer {
+            for (backend.items) |item| std.testing.allocator.free(item.path);
+            backend.deinit(std.testing.allocator);
+        }
+
+        var reader = std.Io.Reader.fixed(input);
+        try UMapUnmanaged.populate(std.testing.allocator, &backend, &reader);
+
+        try std.testing.expectEqual(2, backend.items.len);
+        try std.testing.expectEqual(0x7f6687c76000, backend.items[0].addressBeg);
+        try std.testing.expectEqual(0x7f6687c77000, backend.items[0].addressEnd);
+        try std.testing.expectEqual(0x3000, backend.items[0].offset);
+    }
+
+    test "UMapUnmanaged.populate handles empty input" {
+        var backend = std.ArrayListUnmanaged(UMapEntry){};
+        defer backend.deinit(std.testing.allocator);
+
+        var reader = std.Io.Reader.fixed("");
+        try UMapUnmanaged.populate(std.testing.allocator, &backend, &reader);
+
+        try std.testing.expectEqual(0, backend.items.len);
     }
 
     /// Sorts the map in ascending order for binary search

@@ -2,6 +2,7 @@ const vaxis = @import("vaxis");
 const std = @import("std");
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 const ThreadSafe = @import("lock.zig").ThreadSafe;
+const SymbolTrieList = @import("app.zig").SymbolTrieList;
 
 /// ===================================================================================================================
 /// TUI
@@ -377,7 +378,7 @@ pub const Interface = struct {
 
     // We want the interface to be able to dynamically swap symbols tries in order to allow for updates, likely
     // with some triple buffering setup. We store a list to let a user swap through various bins
-    symbols: *ThreadSafe([]*SymbolTrie),
+    symbols: *SymbolTrieList,
 
     // Active index for symbol
     symbolActive: usize = 0,
@@ -392,10 +393,11 @@ pub const Interface = struct {
     missed: ?*const volatile u64 = null,
 
     // Bare-bones init
-    pub fn init(allocator: std.mem.Allocator, symbols: *ThreadSafe([]*SymbolTrie)) !Interface {
-        const syms = symbols.lock();
-        defer symbols.unlock();
-        return Interface{ .allocator = allocator, .symbols = symbols, .symbolTotal = syms.len };
+    pub fn init(allocator: std.mem.Allocator, symbols: *SymbolTrieList) !Interface {
+        const len = symbols.list.lock().len;
+        defer symbols.list.unlock();
+
+        return Interface{ .allocator = allocator, .symbols = symbols, .symbolTotal = len };
     }
 
     // Start drawing + event loop
@@ -464,8 +466,9 @@ pub const Interface = struct {
                         // UP (k, w, Arrow Up)
                         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches('w', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.lock().*[self.symbolActive];
-                                defer self.symbols.unlock();
+                                const symbols = self.symbols.list.lock().*[self.symbolActive];
+                                defer self.symbols.list.unlock();
+
                                 id.* = navigate(symbols.nodes.items, id.*, .north);
                             } else {
                                 self.highlightedNodeId = SymbolTrie.RootId;
@@ -475,8 +478,8 @@ pub const Interface = struct {
                         // DOWN (j, s, Arrow Down)
                         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches('s', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.lock().*[self.symbolActive];
-                                defer self.symbols.unlock();
+                                const symbols = self.symbols.list.lock().*[self.symbolActive];
+                                defer self.symbols.list.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .south);
                             }
                         }
@@ -484,8 +487,8 @@ pub const Interface = struct {
                         // RIGHT (l, d, Arrow Right)
                         if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches('d', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.lock().*[self.symbolActive];
-                                defer self.symbols.unlock();
+                                const symbols = self.symbols.list.lock().*[self.symbolActive];
+                                defer self.symbols.list.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .east);
                             }
                         }
@@ -493,8 +496,8 @@ pub const Interface = struct {
                         // LEFT (h, a, Arrow Left)
                         if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{}) or key.matches('a', .{})) {
                             if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.lock().*[self.symbolActive];
-                                defer self.symbols.unlock();
+                                const symbols = self.symbols.list.lock().*[self.symbolActive];
+                                defer self.symbols.list.unlock();
                                 id.* = navigate(symbols.nodes.items, id.*, .west);
                             }
                         }
@@ -513,9 +516,43 @@ pub const Interface = struct {
                             } else {
                                 self.symbolActive -= 1;
                             }
-                            std.log.info("{} {}", .{self.symbolActive, self.symbolTotal});
+                            std.log.info("{} {}", .{ self.symbolActive, self.symbolTotal });
                             self.selectedNodeId = SymbolTrie.RootId;
                             self.highlightedNodeId = null;
+                        }
+
+                        // EXPORT: e
+                        if (key.matches('e', .{})) {
+                            const symbols = self.symbols.list.lock().*[self.symbolActive];
+                            defer self.symbols.list.unlock();
+
+                            // Snapshot system time and format the filename
+                            const timestamp = std.time.nanoTimestamp();
+                            var filename_buf: [64]u8 = undefined;
+                            const filename = std.fmt.bufPrint(&filename_buf, "flametui_{d}.collapsed", .{timestamp}) catch |err| {
+                                std.log.err("Failed to format filename: {}", .{err});
+                                continue :event_loop;
+                            };
+
+                            const file = std.fs.cwd().createFile(filename, .{}) catch |err| {
+                                std.log.err("Failed to create export file: {}", .{err});
+                                continue :event_loop;
+                            };
+                            defer file.close();
+
+                            var buf: [8192]u8 = undefined;
+                            var writer = file.writer(&buf);
+                            symbols.exportCollapsed(&writer.interface) catch |err| {
+                                std.log.err("Failed to export collapsed: {}", .{err});
+                                continue :event_loop;
+                            };
+
+                            writer.interface.flush() catch |err| {
+                                std.log.err("Failed to flush export: {}", .{err});
+                                continue :event_loop;
+                            };
+
+                            std.log.info("Exported to {s}", .{filename});
                         }
 
                         if (key.matches(vaxis.Key.enter, .{})) {
@@ -553,8 +590,8 @@ pub const Interface = struct {
                 self.infoSliceSymbol = null;
                 self.infoSliceSharedObjectName = null;
 
-                const symbols = self.symbols.lock().*[self.symbolActive];
-                defer self.symbols.unlock();
+                const symbols = self.symbols.list.lock().*[self.symbolActive];
+                defer self.symbols.list.unlock();
 
                 const win = vx.window();
                 try self.draw(symbols.nodes.items, win, mouse);

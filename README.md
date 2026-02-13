@@ -63,11 +63,25 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 ## Future Roadmap / Ideas
 
+Before `0.0.2-alpha`:
+- [ ] Review files ensuring tests in place and happy: 
+    - [ ] src/app.zig  
+    - [ ] src/bpf.zig  
+    - [ ] src/cimport.zig  
+    - [ ] src/kmap.zig  
+    - [ ] src/lock.zig  
+    - [ ] src/main.zig  
+    - [ ] src/profile.zig  
+    - [ ] src/root.zig  
+    - [ ] src/sharedobject.zig 
+    - [ ] src/stacktrie.zig  
+    - [ ] src/symboltrie.zig  
+    - [ ] src/tui.zig  
+    - [ ] src/umap.zig  
+- [ ] Implement `perf script | flametui`.
+
 There are several areas where this project could be improved:
 
-- [ ] **Write Existing Formats**: 
-        If for some arcane reason someone wants to serialize their measurement, we should
-        Allow that. So I should also be able to EXPORT to collapsed stacktraces for example :)
 - [ ] **Help Menu**: 
         To see what the keybindings are. Not important currently, cause I dont have keybindings.
 - [ ] **Sorting**: 
@@ -75,8 +89,6 @@ There are several areas where this project could be improved:
 - [ ] **Lifecycle Improvements**: 
         PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
         our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
-- [ ] **Tests**: 
-        I love tests, but I have zero. Fix this, testing as much as is reasonable.
 - [ ] **Off-CPU**: 
         I want to make off-cpu flamegraphs too, this seems kind of useful.
     - [ ] mode=offcpu, mode=cpu, etc. CLI arguments
@@ -84,18 +96,10 @@ There are several areas where this project could be improved:
         I'm sure I can cook harder now that I have the basics down
 - [ ] **Vendoring as Library**:
         Plug into build.zig to have an e.g. `zig build profile` step.
-- [ ] **Verification versus perf + flamegraph.pl**:
-        Our program SHOULD give the same result, ensure that this is true.
 - [ ] **Improved error Handling**:
         Currently we have `UNMAPPED` as our only indication, we can be more robust.
 - [ ] **CI/CD for Release**:
         Currently, you gotta build. This sucks, I can just vendor for all major platforms.
-- [ ] **Increase ring accuracy**:
-        In theory, we can timestamp events and make ring 100% accurate. Now we have a dodgy timer and roulette the 
-        entries.
-    - [ ] **Update even on no events**: 
-        Currently, when we get no events the picture just freezes. Ideally, we hook into the timing logic to run the 
-        loop anyway even if we have no events! E.g. emitting a null event or so.
 - [ ] **Resolve Binary Name**:
         Currently, I dont grab the binary / proc name! That's a major bug, can just solve that.
     - [ ] **Resolve TIDs**: 

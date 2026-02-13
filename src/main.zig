@@ -401,12 +401,15 @@ pub fn main() !void {
             var buffer: [8192]u8 = undefined;
             var reader = handle.reader(&buffer);
 
-            const symboltrie = try allocator.create(flametui.SymbolTrie);
-            symboltrie.* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
-            var symboltries = try std.ArrayListUnmanaged(*flametui.SymbolTrie).initCapacity(allocator, 1);
-            try symboltries.append(allocator, symboltrie);
-            const symbols = try allocator.create(flametui.ThreadSafe([]*flametui.SymbolTrie));
-            symbols.* = flametui.ThreadSafe([]*flametui.SymbolTrie).init(&symboltries.items);
+            const symbols = try allocator.create(flametui.SymbolTrieList);
+            defer allocator.destroy(symbols);
+            symbols.* = try flametui.SymbolTrieList.init(allocator, null, 1);
+            defer symbols.deinit(allocator);
+
+            const list = symbols.list.lock();
+            list.*[0].deinit();
+            list.*[0].* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
+            symbols.list.unlock();
 
             var interface = try flametui.Interface.init(allocator, symbols);
             try interface.start();
@@ -417,12 +420,14 @@ pub fn main() !void {
             var stdin_buf: [8192]u8 = undefined;
             var stdin = std.fs.File.stdin().reader(&stdin_buf);
 
-            const symboltrie = try allocator.create(flametui.SymbolTrie);
-            symboltrie.* = try flametui.SymbolTrie.initPerfScript(allocator, &stdin.interface);
-            var symboltries = try std.ArrayListUnmanaged(*flametui.SymbolTrie).initCapacity(allocator, 1);
-            try symboltries.append(allocator, symboltrie);
-            const symbols = try allocator.create(flametui.ThreadSafe([]*flametui.SymbolTrie));
-            symbols.* = flametui.ThreadSafe([]*flametui.SymbolTrie).init(&symboltries.items);
+            const symbols = try allocator.create(flametui.SymbolTrieList);
+            defer allocator.destroy(symbols);
+            symbols.* = try flametui.SymbolTrieList.init(allocator, null, 1);
+            defer symbols.deinit(allocator);
+
+            const list = symbols.list.lock();
+            list.*[0].* = try flametui.SymbolTrie.initPerfScript(allocator, &stdin.interface);
+            symbols.list.unlock();
 
             var interface = try flametui.Interface.init(allocator, symbols);
             try interface.start();

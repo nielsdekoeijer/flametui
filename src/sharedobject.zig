@@ -141,7 +141,7 @@ pub const SharedObjectMap = struct {
                 }.lessThan);
 
                 // Sort invalid
-                if (index == s.symbols.items.len or index == 0) {
+                if (index == 0) {
                     return .{ .notfound = .{} };
                 }
 

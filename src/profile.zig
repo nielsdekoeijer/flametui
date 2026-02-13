@@ -21,9 +21,10 @@ pub const EventTypeRaw = u64;
 /// Wire layout (all fields are `u64`):
 /// ```
 ///   [0]  pid
-///   [1]  user_stack_bytes
-///   [2]  kernel_stack_bytes
-///   [3]  user IPs ... kernel IPs
+///   [1]  timestamp
+///   [2]  user_stack_bytes
+///   [3]  kernel_stack_bytes
+///   [4]  user IPs ... kernel IPs
 /// ```
 pub const EventType = struct {
     pid: u64,
@@ -51,7 +52,7 @@ pub const EventType = struct {
 };
 
 test "EventType.init parses minimal event with empty stacks" {
-    const raw = [_]u64{ 42, 0, 0 }; // pid=42, 0 user bytes, 0 kernel bytes
+    const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
     const event = EventType.init(@ptrCast(&raw));
     try std.testing.expectEqual(42, event.pid);
     try std.testing.expectEqual(0, event.uips.len);
@@ -60,7 +61,8 @@ test "EventType.init parses minimal event with empty stacks" {
 
 test "EventType.init parses event with user and kernel IPs" {
     const raw = [_]u64{
-        1234, // pid
+        @as(u64, 1234) << 32 | 5678, // tgid: pid=1234, tid=5678
+        99999, // timestamp
         16, // user_stack_bytes = 2 IPs * 8
         8, // kernel_stack_bytes = 1 IP * 8
         0xAABB, // uip[0]
@@ -69,6 +71,8 @@ test "EventType.init parses event with user and kernel IPs" {
     };
     const event = EventType.init(@ptrCast(&raw));
     try std.testing.expectEqual(1234, event.pid);
+    try std.testing.expectEqual(5678, event.tid);
+    try std.testing.expectEqual(99999, event.timestamp);
     try std.testing.expectEqual(2, event.uips.len);
     try std.testing.expectEqual(0xAABB, event.uips[0]);
     try std.testing.expectEqual(0xCCDD, event.uips[1]);
@@ -77,8 +81,9 @@ test "EventType.init parses event with user and kernel IPs" {
 }
 
 test "EventType.init parses kernel-only stacks" {
-    const raw = [_]u64{ 99, 0, 16, 0x1111, 0x2222 };
+    const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
     const event = EventType.init(@ptrCast(&raw));
+    try std.testing.expectEqual(99, event.pid);
     try std.testing.expectEqual(0, event.uips.len);
     try std.testing.expectEqual(2, event.kips.len);
 }

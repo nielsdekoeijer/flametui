@@ -142,6 +142,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "profile_streaming", .module = profileStreamingModule },
             },
+            .link_libcpp = true,
         }),
     });
 

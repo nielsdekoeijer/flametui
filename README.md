@@ -70,7 +70,6 @@ Before `0.0.2-alpha`:
     - [ ] src/cimport.zig  
     - [ ] src/kmap.zig  
     - [ ] src/lock.zig  
-    - [ ] src/main.zig  
     - [ ] src/profile.zig  
     - [ ] src/root.zig  
     - [ ] src/sharedobject.zig 

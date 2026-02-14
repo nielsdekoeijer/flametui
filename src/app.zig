@@ -247,7 +247,7 @@ pub const SymbolTrieList = struct {
 /// ===================================================================================================================
 /// App
 /// ===================================================================================================================
-pub const App = struct {
+pub const RingProfilerApp = struct {
     allocator: std.mem.Allocator,
 
     /// Ringbuffer that contains stack tries
@@ -277,7 +277,7 @@ pub const App = struct {
     /// Our TUI
     interface: Interface,
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) anyerror!App {
+    pub fn init(allocator: std.mem.Allocator, bins: usize) anyerror!RingProfilerApp {
         // init ringbuffer pointer
         const ring = try allocator.create(StackTrieRing);
         ring.* = try StackTrieRing.init(allocator, 16);
@@ -307,7 +307,7 @@ pub const App = struct {
         interface.missed = &profiler.globals.dropped_events;
         errdefer interface.deinit();
 
-        return App{
+        return RingProfilerApp{
             .allocator = allocator,
             .ring = ring,
             .context = context,
@@ -321,7 +321,7 @@ pub const App = struct {
         };
     }
 
-    pub fn deinit(self: *App) void {
+    pub fn deinit(self: *RingProfilerApp) void {
         self.stop();
 
         self.symbols.deinit(self.allocator);
@@ -340,7 +340,7 @@ pub const App = struct {
     }
 
     /// Start running the application
-    fn start(self: *App, rate: usize) !void {
+    fn start(self: *RingProfilerApp, rate: usize) !void {
         self.shouldQuit.store(false, .release);
         errdefer self.stop();
 
@@ -352,7 +352,7 @@ pub const App = struct {
     }
 
     /// Stop the application from running by joining threads
-    fn stop(self: *App) void {
+    fn stop(self: *RingProfilerApp) void {
         self.shouldQuit.store(true, .release);
 
         if (self.bpfThread) |t| t.join();
@@ -363,7 +363,7 @@ pub const App = struct {
     }
 
     /// Worker thread, draining bpf events
-    fn bpfWorker(self: *App, rate: usize) void {
+    fn bpfWorker(self: *RingProfilerApp, rate: usize) void {
         self.profiler.start(rate) catch {
             @panic("Could not start profiler");
         };
@@ -381,162 +381,239 @@ pub const App = struct {
     }
 
     /// Manages the tui
-    fn tuiWorker(self: *App) void {
+    fn tuiWorker(self: *RingProfilerApp) void {
         self.interface.start() catch {
             @panic("Could not start TUI");
         };
 
         self.shouldQuit.store(true, .monotonic);
     }
+};
 
-    /// Fixed duration measurement. Profile, then display the result. No streaming.
-    pub fn runFixed(self: *App, rate: usize, timeout_ns: u64) anyerror!void {
-        const symbols_list = self.symbols.list.lock().*;
-        self.symbols.list.unlock();
+/// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
+pub const RingApp = struct {
+    app: RingProfilerApp,
+
+    pub fn init(allocator: std.mem.Allocator) !RingApp {
+        return .{
+            .app = try RingProfilerApp.init(allocator, 1),
+        };
+    }
+
+    pub fn deinit(self: *RingApp) void {
+        self.app.deinit();
+    }
+
+    pub fn run(self: *RingApp, rate: usize, slot_ns: u64, ring_slots: usize) anyerror!void {
+        // Reinitialize ring with requested size
+        self.app.ring.deinit(self.app.allocator);
+        self.app.ring.* = try StackTrieRing.init(self.app.allocator, ring_slots);
+        self.app.context.ring = self.app.ring;
+        self.app.context.iptrie = &self.app.ring.stacktries[0];
+
+        self.app.context.bin_duration_ns = slot_ns;
+
+        try self.app.start(rate);
+
+        const merge_interval = 16 * std.time.ns_per_ms;
+
+        while (!self.app.shouldQuit.load(.acquire)) {
+            var shouldRedraw = false;
+            if (self.app.ring.peekReaderTail()) |stack_trie| {
+                const symbols = self.app.symbols.list.lock().*[0];
+                defer self.app.symbols.list.unlock();
+
+                try symbols.map(stack_trie.*, .evict);
+                stack_trie.reset();
+
+                self.app.ring.advanceReaderTail();
+
+                shouldRedraw = true;
+            }
+
+            while (self.app.ring.peekReaderHead()) |stack_trie| {
+                const symbols = self.app.symbols.list.lock().*[0];
+                defer self.app.symbols.list.unlock();
+
+                try symbols.map(stack_trie.*, .merge);
+
+                self.app.ring.advanceReaderHead();
+
+                shouldRedraw = true;
+            }
+
+            if (self.app.interface.loop) |*loop| {
+                if (shouldRedraw) {
+                    loop.postEvent(.{ .redraw = {} });
+                }
+            }
+
+            std.Thread.sleep(merge_interval);
+        }
+    }
+};
+
+/// Aggregate indefinitely. Streams results to TUI, never evicts.
+pub const AggregateApp = struct {
+    app: RingProfilerApp,
+
+    pub fn init(allocator: std.mem.Allocator) !AggregateApp {
+        return .{
+            .app = try RingProfilerApp.init(allocator, 1),
+        };
+    }
+
+    pub fn deinit(self: *AggregateApp) void {
+        self.app.deinit();
+    }
+
+    pub fn run(self: *AggregateApp, rate: usize) anyerror!void {
+        // Rotate the ring, but never evict old data
+        self.app.context.bin_duration_ns = 50 * std.time.ns_per_ms;
+
+        try self.app.start(rate);
+
+        const merge_interval = 16 * std.time.ns_per_ms;
+
+        while (!self.app.shouldQuit.load(.acquire)) {
+            var shouldRedraw = false;
+
+            while (self.app.ring.peekReaderHead()) |stack_trie| {
+                const symbols = self.app.symbols.list.lock().*[0];
+                defer self.app.symbols.list.unlock();
+
+                try symbols.map(stack_trie.*, .merge);
+
+                self.app.ring.advanceReaderHead();
+                shouldRedraw = true;
+            }
+
+            while (self.app.ring.peekReaderTail()) |stack_trie| {
+                stack_trie.reset();
+                self.app.ring.advanceReaderTail();
+            }
+
+            if (self.app.interface.loop) |*loop| {
+                if (shouldRedraw) {
+                    loop.postEvent(.{ .redraw = {} });
+                }
+            }
+
+            std.Thread.sleep(merge_interval);
+        }
+    }
+};
+
+/// Fixed duration measurement. Profile, then display the result. No streaming.
+pub const FixedApp = struct {
+    app: RingProfilerApp,
+
+    pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedApp {
+        return .{
+            .app = try RingProfilerApp.init(allocator, bins),
+        };
+    }
+
+    pub fn deinit(self: *FixedApp) void {
+        self.app.deinit();
+    }
+
+    pub fn run(self: *FixedApp, rate: usize, timeout_ns: u64) anyerror!void {
+        const symbols_list = self.app.symbols.list.lock().*;
+        self.app.symbols.list.unlock();
 
         const num_bins = symbols_list.len;
 
         if (num_bins > 1) {
             const bin_ns = timeout_ns / num_bins;
 
-            self.ring.deinit(self.allocator);
-            self.ring.* = try StackTrieRing.init(self.allocator, num_bins);
-            self.context.ring = self.ring;
-            self.context.iptrie = &self.ring.stacktries[0];
-            self.context.bin_duration_ns = bin_ns;
+            self.app.ring.deinit(self.app.allocator);
+            self.app.ring.* = try StackTrieRing.init(self.app.allocator, num_bins);
+            self.app.context.ring = self.app.ring;
+            self.app.context.iptrie = &self.app.ring.stacktries[0];
+            self.app.context.bin_duration_ns = bin_ns;
 
             // Neuter the ring protocol so progressWriterHead never blocks.
             // TODO: probably make a thing that just uses a list rather than the existing ring
-            self.ring.writerHead = 0;
-            self.ring.readerHead = 0;
-            self.ring.readerTail = 0;
+            self.app.ring.writerHead = 0;
+            self.app.ring.readerHead = 0;
+            self.app.ring.readerTail = 0;
 
-            try self.profiler.start(rate);
-            defer self.profiler.stop();
+            try self.app.profiler.start(rate);
+            defer self.app.profiler.stop();
 
             var timer = try std.time.Timer.start();
 
             while (timer.read() < timeout_ns) {
-                const count = try self.profiler.ring.consume();
+                const count = try self.app.profiler.ring.consume();
 
                 if (count == 0) {
-                    try self.profiler.ring.poll(10);
+                    try self.app.profiler.ring.poll(10);
                 }
             }
 
             // Map ring slot i -> symbol trie i
             for (0..num_bins) |i| {
-                if (self.ring.stacktries[i].nodes.items[StackTrie.RootId].hitCount > 0) {
-                    try symbols_list[i].map(self.ring.stacktries[i], .merge);
+                if (self.app.ring.stacktries[i].nodes.items[StackTrie.RootId].hitCount > 0) {
+                    try symbols_list[i].map(self.app.ring.stacktries[i], .merge);
                 }
             }
         } else {
-            self.context.bin_duration_ns = std.math.maxInt(u64);
+            self.app.context.bin_duration_ns = std.math.maxInt(u64);
 
-            try self.profiler.start(rate);
-            defer self.profiler.stop();
+            try self.app.profiler.start(rate);
+            defer self.app.profiler.stop();
 
             var timer = try std.time.Timer.start();
             while (timer.read() < timeout_ns) {
-                const count = try self.profiler.ring.consume();
+                const count = try self.app.profiler.ring.consume();
                 if (count == 0) {
-                    try self.profiler.ring.poll(10);
+                    try self.app.profiler.ring.poll(10);
                 }
             }
 
             {
-                const symbols = self.symbols.list.lock().*[0];
-                defer self.symbols.list.unlock();
-                try symbols.map(self.ring.stacktries[0], .merge);
+                const symbols = self.app.symbols.list.lock().*[0];
+                defer self.app.symbols.list.unlock();
+                try symbols.map(self.app.ring.stacktries[0], .merge);
             }
         }
 
-        try self.interface.start();
+        try self.app.interface.start();
     }
+};
 
-    /// Aggregate indefinitely. Streams results to TUI, never evicts.
-    pub fn runAggregate(self: *App, rate: usize) anyerror!void {
-        // Rotate the ring, but never evict old data
-        self.context.bin_duration_ns = 50 * std.time.ns_per_ms;
+/// From a collapsed file
+pub const FileApp = struct {
+    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) anyerror!void {
+        const symbols = try allocator.create(SymbolTrieList);
+        defer allocator.destroy(symbols);
+        symbols.* = try SymbolTrieList.init(allocator, null, 1);
+        defer symbols.deinit(allocator);
 
-        try self.start(rate);
+        const list = symbols.list.lock();
+        list.*[0].deinit();
+        list.*[0].* = try SymbolTrie.initCollapsed(allocator, reader);
+        symbols.list.unlock();
 
-        const merge_interval = 16 * std.time.ns_per_ms;
-
-        while (!self.shouldQuit.load(.acquire)) {
-            var shouldRedraw = false;
-
-            while (self.ring.peekReaderHead()) |stack_trie| {
-                const symbols = self.symbols.list.lock().*[0];
-                defer self.symbols.list.unlock();
-
-                try symbols.map(stack_trie.*, .merge);
-
-                self.ring.advanceReaderHead();
-                shouldRedraw = true;
-            }
-
-            while (self.ring.peekReaderTail()) |stack_trie| {
-                stack_trie.reset();
-                self.ring.advanceReaderTail();
-            }
-
-            if (self.interface.loop) |*loop| {
-                if (shouldRedraw) {
-                    loop.postEvent(.{ .redraw = {} });
-                }
-            }
-
-            std.Thread.sleep(merge_interval);
-        }
+        var interface = try Interface.init(allocator, symbols);
+        try interface.start();
     }
+};
 
-    /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
-    pub fn runRing(self: *App, rate: usize, slot_ns: u64, ring_slots: usize) anyerror!void {
-        // Reinitialize ring with requested size
-        self.ring.deinit(self.allocator);
-        self.ring.* = try StackTrieRing.init(self.allocator, ring_slots);
-        self.context.ring = self.ring;
-        self.context.iptrie = &self.ring.stacktries[0];
+/// From a perf script
+pub const StdinApp = struct {
+    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) anyerror!void {
+        const symbols = try allocator.create(SymbolTrieList);
+        defer allocator.destroy(symbols);
+        symbols.* = try SymbolTrieList.init(allocator, null, 1);
+        defer symbols.deinit(allocator);
 
-        self.context.bin_duration_ns = slot_ns;
+        const list = symbols.list.lock();
+        list.*[0].* = try SymbolTrie.initPerfScript(allocator, reader);
+        symbols.list.unlock();
 
-        try self.start(rate);
-
-        const merge_interval = 16 * std.time.ns_per_ms;
-
-        while (!self.shouldQuit.load(.acquire)) {
-            var shouldRedraw = false;
-            if (self.ring.peekReaderTail()) |stack_trie| {
-                const symbols = self.symbols.list.lock().*[0];
-                defer self.symbols.list.unlock();
-
-                try symbols.map(stack_trie.*, .evict);
-                stack_trie.reset();
-
-                self.ring.advanceReaderTail();
-
-                shouldRedraw = true;
-            }
-
-            while (self.ring.peekReaderHead()) |stack_trie| {
-                const symbols = self.symbols.list.lock().*[0];
-                defer self.symbols.list.unlock();
-
-                try symbols.map(stack_trie.*, .merge);
-
-                self.ring.advanceReaderHead();
-
-                shouldRedraw = true;
-            }
-
-            if (self.interface.loop) |*loop| {
-                if (shouldRedraw) {
-                    loop.postEvent(.{ .redraw = {} });
-                }
-            }
-
-            std.Thread.sleep(merge_interval);
-        }
+        var interface = try Interface.init(allocator, symbols);
+        try interface.start();
     }
 };

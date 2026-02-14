@@ -27,6 +27,29 @@ fn logHandle(
 }
 
 /// ===================================================================================================================
+/// Helper
+/// ===================================================================================================================
+fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
+    if (std.os.linux.geteuid() != 0) {
+        Options.exitWithUsage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
+    }
+}
+
+fn configureProfiler(profiler: anytype, general: Options.GeneralOptions, pid: ?[]i32) void {
+    profiler.globals.enable_idle = if (general.enable_idle) 1 else 0;
+
+    if (pid) |p| {
+        const len = @min(32, p.len);
+        for (0..len) |i| {
+            profiler.globals.pids[i] = @intCast(p[i]);
+        }
+        profiler.globals.pids_len = len;
+    } else {
+        profiler.globals.pids_len = 0;
+    }
+}
+
+/// ===================================================================================================================
 /// Arguments
 /// ===================================================================================================================
 const Options = struct {
@@ -57,22 +80,56 @@ const Options = struct {
             hz: usize = 49,
             ms: u64 = 1000,
             pid: ?[]i32 = null,
-            bins: ?u64 = null,
+            bins: usize = 1,
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                if (self.pid) |pid| {
+                    allocator.free(pid);
+                }
+
+                self.* = undefined;
+            }
         },
         aggregate: struct {
             hz: usize = 49,
             pid: ?[]i32 = null,
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                if (self.pid) |pid| {
+                    allocator.free(pid);
+                }
+
+                self.* = undefined;
+            }
         },
         ring: struct {
             hz: usize = 49,
             ms: u64 = 50,
-            n: u64 = 4,
+            n: u64 = 10,
             pid: ?[]i32 = null,
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                if (self.pid) |pid| {
+                    allocator.free(pid);
+                }
+
+                self.* = undefined;
+            }
         },
         file: struct {
             file_path: ?[]const u8 = null,
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                _ = self;
+                _ = allocator;
+            }
         },
-        stdin: struct {},
+        stdin: struct {
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                _ = self;
+                _ = allocator;
+            }
+        },
     };
 
     pub fn usage(exe_name: []const u8, writer: *std.Io.Writer) !void {
@@ -88,7 +145,7 @@ const Options = struct {
             \\Options (fixed): 
             \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
             \\  --ms   <int>    (optional) Profile duration in milliseconds (default: 1000)
-            \\  --bins <int>    (optional) Size of bins in milliseconds (default: 1 big bin)
+            \\  --bins <int>    (optional) Number of bins to split into (default: 1)
             \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
             \\
             \\Options (aggregate):
@@ -106,7 +163,7 @@ const Options = struct {
             \\
             \\General:
             \\  --verbose      (optional) Enable verbose logging
-            \\  --enable-idle  (optional) While measuring, filter out idle processes (i.e. pid 0)
+            \\  --enable-idle  (optional) While measuring, include idle processes (i.e. pid 0)
             \\  -h, --help     (optional) Print this help message
             \\
             \\
@@ -153,7 +210,7 @@ const Options = struct {
         flag: []const u8,
         writer: *std.Io.Writer,
         exe_name: []const u8,
-    ) []T {
+    ) ![]T {
         const val = args.next() orelse {
             writer.print("Missing value for {s}\n", .{flag}) catch {};
             Options.usage(exe_name, writer) catch {};
@@ -162,7 +219,7 @@ const Options = struct {
         };
 
         var tokens = std.mem.splitScalar(u8, val, ' ');
-        var arraylist = std.ArrayListUnmanaged(i32){};
+        var arraylist = std.ArrayListUnmanaged(T){};
 
         while (tokens.next()) |token| {
             const int = std.fmt.parseInt(T, token, 10) catch |err| {
@@ -178,7 +235,7 @@ const Options = struct {
             };
         }
 
-        return arraylist.items;
+        return try arraylist.toOwnedSlice(allocator);
     }
 
     /// Get arguments
@@ -190,7 +247,7 @@ const Options = struct {
         };
     }
 
-    pub fn parse(allocator: std.mem.Allocator, writer: *std.Io.Writer) Options {
+    pub fn parse(allocator: std.mem.Allocator, writer: *std.Io.Writer) !Options {
         var args = getArgumentsOrExit(writer);
         defer args.deinit();
 
@@ -225,9 +282,9 @@ const Options = struct {
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--bins")) {
-                    opts.bins = parseIntArgOrExit(u64, &args, "--bins", writer, exe_name);
+                    opts.bins = parseIntArgOrExit(usize, &args, "--bins", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
+                    opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
@@ -241,7 +298,7 @@ const Options = struct {
                 if (std.mem.eql(u8, arg, "--hz")) {
                     opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
+                    opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
@@ -257,7 +314,7 @@ const Options = struct {
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
-                    opts.pid = parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
+                    opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--n")) {
                     opts.n = parseIntArgOrExit(u64, &args, "--n", writer, exe_name);
                     if (opts.n < 4) {
@@ -331,63 +388,46 @@ pub fn main() !void {
     var stderr = std.fs.File.stderr().writer(&stderr_buf);
     const writer = &stderr.interface;
 
-    const opts = Options.parse(allocator, writer);
+    var opts = try Options.parse(allocator, writer);
+    defer {
+        switch (opts.command) {
+            inline else => |*command| command.deinit(allocator),
+        }
+    }
+
     switch (opts.command) {
-        inline .fixed, .aggregate, .ring => |command| {
+        .fixed => |command| {
             requireRoot(writer, "flametui");
 
-            var app = blk: {
-                switch (opts.command) {
-                    inline .fixed => |comm| {
-                        if (comm.bins) |bin_ms| {
-                            const num_bins = (comm.ms + bin_ms) / bin_ms - 1;
-                            break :blk try flametui.App.init(allocator, num_bins);
-                        }
-
-                        break :blk try flametui.App.init(allocator, 1);
-                    },
-                    inline else => break :blk try flametui.App.init(allocator, 1),
-                }
-            };
-
+            var app = try flametui.FixedApp.init(allocator, command.bins);
             defer app.deinit();
 
-            if (opts.general.enable_idle) {
-                app.profiler.globals.enable_idle = 1;
-            } else {
-                app.profiler.globals.enable_idle = 0;
-            }
+            configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            if (command.pid) |pid| {
-                const len = @min(32, pid.len);
+            try app.run(command.hz, command.ms * std.time.ns_per_ms);
+        },
+        .aggregate => |command| {
+            requireRoot(writer, "flametui");
 
-                for (0..len) |i| {
-                    app.profiler.globals.pids[i] = @intCast(pid[i]);
-                }
+            var app = try flametui.AggregateApp.init(allocator);
+            defer app.deinit();
 
-                app.profiler.globals.pids_len = len;
-            } else {
-                // pid_len == 0 -> no filter
-                app.profiler.globals.pids_len = 0;
-            }
+            configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            switch (opts.command) {
-                .aggregate => |comm| {
-                    try app.runAggregate(comm.hz);
-                },
-                .fixed => |comm| {
-                    const timeout_ns = comm.ms * std.time.ns_per_ms;
-                    try app.runFixed(comm.hz, timeout_ns);
-                },
-                .ring => |comm| {
-                    const slot_ns = comm.ms * std.time.ns_per_ms;
-                    try app.runRing(comm.hz, slot_ns, comm.n);
-                },
-                else => unreachable,
-            }
+            try app.run(command.hz);
+        },
+        .ring => |command| {
+            requireRoot(writer, "flametui");
+
+            var app = try flametui.RingApp.init(allocator);
+            defer app.deinit();
+
+            configureProfiler(app.app.profiler, opts.general, command.pid);
+
+            try app.run(command.hz, command.ms * std.time.ns_per_ms, command.n);
         },
         .file => |file| {
-            const path = file.file_path.?;
+            const path = file.file_path orelse unreachable;
 
             var handle = std.fs.cwd().openFile(path, .{}) catch |err| {
                 writer.print("Could not open file '{s}': {}\n", .{ path, err }) catch {};
@@ -396,47 +436,20 @@ pub fn main() !void {
             };
             defer handle.close();
 
-            // MAJOR ISSUE: if lines longer than 4096 -> we're fucked.
+            // MAJOR ISSUE: if lines longer than 8192 -> we're fucked.
             // TODO: switch all readers to streaming where applicable
             var buffer: [8192]u8 = undefined;
             var reader = handle.reader(&buffer);
 
-            const symbols = try allocator.create(flametui.SymbolTrieList);
-            defer allocator.destroy(symbols);
-            symbols.* = try flametui.SymbolTrieList.init(allocator, null, 1);
-            defer symbols.deinit(allocator);
-
-            const list = symbols.list.lock();
-            list.*[0].deinit();
-            list.*[0].* = try flametui.SymbolTrie.initCollapsed(allocator, &reader.interface);
-            symbols.list.unlock();
-
-            var interface = try flametui.Interface.init(allocator, symbols);
-            try interface.start();
+            try flametui.FileApp.run(allocator, &reader.interface);
         },
         .stdin => {
-            // MAJOR ISSUE: if lines longer than 4096 -> we're fucked.
+            // MAJOR ISSUE: if lines longer than 8192 -> we're fucked.
             // TODO: switch all readers to streaming where applicable
             var stdin_buf: [8192]u8 = undefined;
             var stdin = std.fs.File.stdin().reader(&stdin_buf);
 
-            const symbols = try allocator.create(flametui.SymbolTrieList);
-            defer allocator.destroy(symbols);
-            symbols.* = try flametui.SymbolTrieList.init(allocator, null, 1);
-            defer symbols.deinit(allocator);
-
-            const list = symbols.list.lock();
-            list.*[0].* = try flametui.SymbolTrie.initPerfScript(allocator, &stdin.interface);
-            symbols.list.unlock();
-
-            var interface = try flametui.Interface.init(allocator, symbols);
-            try interface.start();
+            try flametui.StdinApp.run(allocator, &stdin.interface);
         },
-    }
-}
-
-fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
-    if (std.os.linux.geteuid() != 0) {
-        Options.exitWithUsage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
     }
 }

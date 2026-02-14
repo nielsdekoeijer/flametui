@@ -1,12 +1,11 @@
-pub const App = @import("app.zig").App;
-pub const SymbolTrieList = @import("app.zig").SymbolTrieList;
-pub const Interface = @import("tui.zig").Interface;
-pub const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
-pub const ThreadSafe = @import("lock.zig").ThreadSafe;
-
-const std = @import("std");
+pub const RingApp = @import("app.zig").RingApp;
+pub const AggregateApp = @import("app.zig").AggregateApp;
+pub const FixedApp = @import("app.zig").FixedApp;
+pub const FileApp = @import("app.zig").FileApp;
+pub const StdinApp = @import("app.zig").StdinApp;
 
 test {
+    const std = @import("std");
     std.testing.refAllDeclsRecursive(@import("bpf.zig"));
     std.testing.refAllDeclsRecursive(@import("kmap.zig"));
     std.testing.refAllDeclsRecursive(@import("lock.zig"));

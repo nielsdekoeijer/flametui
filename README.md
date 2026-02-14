@@ -65,7 +65,6 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 Before `0.0.2-alpha`:
 - [ ] Review files ensuring tests in place and happy: 
-    - [ ] src/app.zig  
     - [ ] src/bpf.zig  
     - [ ] src/cimport.zig  
     - [ ] src/kmap.zig  

@@ -105,7 +105,7 @@ const Options = struct {
         ring: struct {
             hz: usize = 49,
             ms: u64 = 50,
-            n: u64 = 10,
+            n: usize = 10,
             pid: ?[]i32 = null,
 
             pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -316,7 +316,7 @@ const Options = struct {
                 } else if (std.mem.eql(u8, arg, "--pid")) {
                     opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--n")) {
-                    opts.n = parseIntArgOrExit(u64, &args, "--n", writer, exe_name);
+                    opts.n = parseIntArgOrExit(usize, &args, "--n", writer, exe_name);
                     if (opts.n < 4) {
                         exitWithUsage(writer, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{opts.n});
                     }

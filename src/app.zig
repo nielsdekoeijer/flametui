@@ -23,8 +23,8 @@ const ThreadSafe = @import("lock.zig").ThreadSafe;
 /// Callback Contexts
 /// ===================================================================================================================
 const RingProfilerContext = struct {
-    bin_start_ns: ?u64,
-    bin_duration_ns: u64,
+    binStartNanoseconds: ?u64,
+    binDurationNanoseconds: u64,
     iptrie: *StackTrie,
     umapCache: UMapCache,
     ring: *StackTrieRing,
@@ -34,8 +34,8 @@ const RingProfilerContext = struct {
             .ring = ring,
             .iptrie = &ring.stacktries[0],
             .umapCache = try UMapCache.init(allocator),
-            .bin_start_ns = null,
-            .bin_duration_ns = 100 * std.time.ns_per_ms,
+            .binStartNanoseconds = null,
+            .binDurationNanoseconds = 100 * std.time.ns_per_ms,
         };
     }
 
@@ -49,12 +49,12 @@ const RingProfilerContext = struct {
     pub fn callback(context: *RingProfilerContext, event: *const EventTypeRaw) void {
         const parsed = EventType.init(event);
 
-        if (context.bin_start_ns) |*bin_start_ns| {
-            if (parsed.timestamp >= bin_start_ns.* +| context.bin_duration_ns) {
-                const elapsed = parsed.timestamp - bin_start_ns.*;
-                const bins_elapsed = elapsed / context.bin_duration_ns;
+        if (context.binStartNanoseconds) |*binStartNanoseconds| {
+            if (parsed.timestamp >= binStartNanoseconds.* +| context.binDurationNanoseconds) {
+                const elapsed = parsed.timestamp - binStartNanoseconds.*;
+                const bins_elapsed = elapsed / context.binDurationNanoseconds;
 
-                bin_start_ns.* += bins_elapsed * context.bin_duration_ns;
+                binStartNanoseconds.* += bins_elapsed * context.binDurationNanoseconds;
 
                 if (context.ring.progressWriterHead()) |new| {
                     context.iptrie = new;
@@ -63,7 +63,7 @@ const RingProfilerContext = struct {
             }
         } else {
             // Populate if not yet defined
-            context.bin_start_ns = parsed.timestamp;
+            context.binStartNanoseconds = parsed.timestamp;
         }
 
         // Cannot throw, so panic on error
@@ -277,7 +277,7 @@ pub const RingProfilerApp = struct {
     /// Our TUI
     interface: Interface,
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) anyerror!RingProfilerApp {
+    pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfilerApp {
         // init ringbuffer pointer
         const ring = try allocator.create(StackTrieRing);
         ring.* = try StackTrieRing.init(allocator, 16);
@@ -386,7 +386,7 @@ pub const RingProfilerApp = struct {
             @panic("Could not start TUI");
         };
 
-        self.shouldQuit.store(true, .monotonic);
+        self.shouldQuit.store(true, .release);
     }
 };
 
@@ -404,14 +404,14 @@ pub const RingApp = struct {
         self.app.deinit();
     }
 
-    pub fn run(self: *RingApp, rate: usize, slot_ns: u64, ring_slots: usize) anyerror!void {
+    pub fn run(self: *RingApp, rate: usize, slot_ns: u64, ring_slots: usize) !void {
         // Reinitialize ring with requested size
         self.app.ring.deinit(self.app.allocator);
         self.app.ring.* = try StackTrieRing.init(self.app.allocator, ring_slots);
         self.app.context.ring = self.app.ring;
         self.app.context.iptrie = &self.app.ring.stacktries[0];
 
-        self.app.context.bin_duration_ns = slot_ns;
+        self.app.context.binDurationNanoseconds = slot_ns;
 
         try self.app.start(rate);
 
@@ -420,7 +420,7 @@ pub const RingApp = struct {
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
             if (self.app.ring.peekReaderTail()) |stack_trie| {
-                const symbols = self.app.symbols.list.lock().*[0];
+                const symbols = (self.app.symbols.list.lock().*)[0];
                 defer self.app.symbols.list.unlock();
 
                 try symbols.map(stack_trie.*, .evict);
@@ -467,9 +467,9 @@ pub const AggregateApp = struct {
         self.app.deinit();
     }
 
-    pub fn run(self: *AggregateApp, rate: usize) anyerror!void {
+    pub fn run(self: *AggregateApp, rate: usize) !void {
         // Rotate the ring, but never evict old data
-        self.app.context.bin_duration_ns = 50 * std.time.ns_per_ms;
+        self.app.context.binDurationNanoseconds = 50 * std.time.ns_per_ms;
 
         try self.app.start(rate);
 
@@ -518,20 +518,21 @@ pub const FixedApp = struct {
         self.app.deinit();
     }
 
-    pub fn run(self: *FixedApp, rate: usize, timeout_ns: u64) anyerror!void {
-        const symbols_list = self.app.symbols.list.lock().*;
-        self.app.symbols.list.unlock();
+    pub fn run(self: *FixedApp, rate: usize, timeout_ns: u64) !void {
+        const binCount = blk: {
+            const symbols = self.app.symbols.list.lock();
+            defer self.app.symbols.list.unlock();
+            break :blk symbols.len;
+        };
 
-        const num_bins = symbols_list.len;
-
-        if (num_bins > 1) {
-            const bin_ns = timeout_ns / num_bins;
+        if (binCount > 1) {
+            const bin_ns = timeout_ns / binCount;
 
             self.app.ring.deinit(self.app.allocator);
-            self.app.ring.* = try StackTrieRing.init(self.app.allocator, num_bins);
+            self.app.ring.* = try StackTrieRing.init(self.app.allocator, binCount);
             self.app.context.ring = self.app.ring;
             self.app.context.iptrie = &self.app.ring.stacktries[0];
-            self.app.context.bin_duration_ns = bin_ns;
+            self.app.context.binDurationNanoseconds = bin_ns;
 
             // Neuter the ring protocol so progressWriterHead never blocks.
             // TODO: probably make a thing that just uses a list rather than the existing ring
@@ -553,13 +554,15 @@ pub const FixedApp = struct {
             }
 
             // Map ring slot i -> symbol trie i
-            for (0..num_bins) |i| {
+            for (0..binCount) |i| {
+                const symbols = self.app.symbols.list.lock();
+                defer self.app.symbols.list.unlock();
                 if (self.app.ring.stacktries[i].nodes.items[StackTrie.RootId].hitCount > 0) {
-                    try symbols_list[i].map(self.app.ring.stacktries[i], .merge);
+                    try (symbols.*)[i].map(self.app.ring.stacktries[i], .merge);
                 }
             }
         } else {
-            self.app.context.bin_duration_ns = std.math.maxInt(u64);
+            self.app.context.binDurationNanoseconds = std.math.maxInt(u64);
 
             try self.app.profiler.start(rate);
             defer self.app.profiler.stop();
@@ -585,7 +588,7 @@ pub const FixedApp = struct {
 
 /// From a collapsed file
 pub const FileApp = struct {
-    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) anyerror!void {
+    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) !void {
         const symbols = try allocator.create(SymbolTrieList);
         defer allocator.destroy(symbols);
         symbols.* = try SymbolTrieList.init(allocator, null, 1);
@@ -597,23 +600,26 @@ pub const FileApp = struct {
         symbols.list.unlock();
 
         var interface = try Interface.init(allocator, symbols);
+        defer interface.deinit();
         try interface.start();
     }
 };
 
 /// From a perf script
 pub const StdinApp = struct {
-    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) anyerror!void {
+    pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) !void {
         const symbols = try allocator.create(SymbolTrieList);
         defer allocator.destroy(symbols);
         symbols.* = try SymbolTrieList.init(allocator, null, 1);
         defer symbols.deinit(allocator);
 
         const list = symbols.list.lock();
+        list.*[0].deinit();
         list.*[0].* = try SymbolTrie.initPerfScript(allocator, reader);
         symbols.list.unlock();
 
         var interface = try Interface.init(allocator, symbols);
+        defer interface.deinit();
         try interface.start();
     }
 };

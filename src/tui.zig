@@ -400,6 +400,10 @@ pub const Interface = struct {
         return Interface{ .allocator = allocator, .symbols = symbols, .symbolTotal = len };
     }
 
+    pub fn deinit(self: *Interface) void {
+        self.* = undefined;
+    }
+
     // Start drawing + event loop
     pub fn start(self: *Interface) !void {
         // Create tty handle

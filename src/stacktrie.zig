@@ -106,7 +106,7 @@ pub const StackTrie = struct {
         });
 
         return StackTrie{
-            .umaps = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 0),
+            .umaps = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 1024),
             .nodes = nodes,
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
                 allocator,
@@ -158,9 +158,9 @@ pub const StackTrie = struct {
             } else {
                 // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntry
                 const umap = try umapCache.find(pid);
-                const item: UMapEntry = switch (umap.*) {
-                    .loaded => |entry| if (entry.find(ip)) |e|
-                        try e.clone(self.allocator)
+                var item: UMapEntry = switch (umap.*) {
+                    .loaded => |entry| if (try entry.findAndDupe(self.allocator, ip)) |e|
+                        e
                     else
                         UMapEntry{
                             .path = try self.allocator.dupe(u8, "not found"),
@@ -177,6 +177,7 @@ pub const StackTrie = struct {
                         .addressEnd = 0,
                     },
                 };
+                errdefer item.deinit(self.allocator);
 
                 // Append it to self
                 try self.umaps.append(self.allocator, item);
@@ -250,7 +251,7 @@ pub const StackTrie = struct {
         }
     }
 
-    test "add kernel-only event creates correct trie structure" {
+    test "stacktrie.StackTrie add kernel-only event creates correct trie structure" {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
@@ -280,7 +281,7 @@ pub const StackTrie = struct {
         try std.testing.expectEqual(0xAAAA, trie.nodes.items[2].payload.kernel.kmapip);
     }
 
-    test "add duplicate kernel event increments hit counts" {
+    test "stacktrie.StackTrie add duplicate kernel event increments hit counts" {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
@@ -304,7 +305,7 @@ pub const StackTrie = struct {
         try std.testing.expectEqual(2, trie.nodes.items[1].hitCount);
     }
 
-    test "different PIDs create distinct nodes for same IP" {
+    test "stacktrie.StackTrie different PIDs create distinct nodes for same IP" {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
@@ -334,7 +335,7 @@ pub const StackTrie = struct {
         self.umaps.clearRetainingCapacity();
     }
 
-    test "reset preserves root, clears everything else" {
+    test "stacktrie.StackTrie reset preserves root, clears everything else" {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 

@@ -52,26 +52,26 @@ fn tryDemangleOrDupe(allocator: std.mem.Allocator, mangled_name: []const u8) ![]
     return try allocator.dupe(u8, mangled_name);
 }
 
-test "tryDemangleOrDupe dupes original for non-C++ symbols" {
+test "symboltrie.tryDemangleOrDupe dupes original for non-C++ symbols" {
     const result = try tryDemangleOrDupe(std.testing.allocator, "main");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("main", result);
 }
 
-test "tryDemangleOrDupe demangles C++ symbol" {
+test "symboltrie.tryDemangleOrDupe demangles C++ symbol" {
     const result = try tryDemangleOrDupe(std.testing.allocator, "_ZN3foo3barEv");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("foo::bar()", result);
 }
 
-test "tryDemangleOrDupe returns original for invalid mangled name" {
+test "symboltrie.tryDemangleOrDupe returns original for invalid mangled name" {
     const result = try tryDemangleOrDupe(std.testing.allocator, "_Znonsense");
     defer std.testing.allocator.free(result);
     // __cxa_demangle fails, should fall back to original
     try std.testing.expectEqualStrings("_Znonsense", result);
 }
 
-test "tryDemangleOrDupe handles empty string" {
+test "symboltrie.tryDemangleOrDupe handles empty string" {
     const result = try tryDemangleOrDupe(std.testing.allocator, "");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("", result);
@@ -177,6 +177,7 @@ pub const SymbolTrie = struct {
             const rootKey = Key{ .parent = RootId, .symbolHash = hashSymbol("root") };
             try self.nodesLookup.put(self.allocator, rootKey, RootId);
         }
+
         while (true) {
             // Take line by line
             const line = reader.takeDelimiterExclusive('\n') catch break;
@@ -238,7 +239,7 @@ pub const SymbolTrie = struct {
         return self;
     }
 
-    test "initCollapsed parses simple collapsed format" {
+    test "symboltrie.SymbolTrie.initCollapsed parses simple collapsed format" {
         const input = "main;foo;bar 10\nmain;foo;baz 5\n";
         var reader = std.Io.Reader.fixed(input);
 
@@ -250,7 +251,7 @@ pub const SymbolTrie = struct {
         try std.testing.expectEqual(15, trie.nodes.items[SymbolTrie.RootId].hitCount);
     }
 
-    test "initCollapsed handles empty input" {
+    test "symboltrie.SymbolTrie.initCollapsed handles empty input" {
         var reader = std.Io.Reader.fixed("");
 
         var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
@@ -259,7 +260,7 @@ pub const SymbolTrie = struct {
         try std.testing.expectEqual(1, trie.nodes.items.len); // just root
     }
 
-    test "initCollapsed skips blank lines" {
+    test "symboltrie.SymbolTrie.initCollapsed skips blank lines" {
         const input = "\n\nmain;foo 3\n\n";
         var reader = std.Io.Reader.fixed(input);
 
@@ -306,7 +307,7 @@ pub const SymbolTrie = struct {
         }
     }
 
-    test "exportCollapsed round-trips with initCollapsed" {
+    test "symboltrie.SymbolTrie.exportCollapsed round-trips with initCollapsed" {
         const input = "main;foo;bar 10\nmain;foo;baz 5\nmain;qux 3\n";
         var reader = std.Io.Reader.fixed(input);
 
@@ -329,7 +330,7 @@ pub const SymbolTrie = struct {
         try std.testing.expectEqual(trie.nodes.items[SymbolTrie.RootId].hitCount, trie2.nodes.items[SymbolTrie.RootId].hitCount);
     }
 
-    test "exportCollapsed emits nothing for empty trie" {
+    test "symboltrie.SymbolTrie.exportCollapsed emits nothing for empty trie" {
         var reader = std.Io.Reader.fixed("");
         var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
         defer trie.deinit();
@@ -341,7 +342,7 @@ pub const SymbolTrie = struct {
         try std.testing.expectEqual(0, stream.getWritten().len);
     }
 
-    test "exportCollapsed single stack" {
+    test "symboltrie.SymbolTrie.exportCollapsed single stack" {
         const input = "a;b;c 7\n";
         var reader = std.Io.Reader.fixed(input);
         var trie = try SymbolTrie.initCollapsed(std.testing.allocator, &reader);
@@ -431,7 +432,7 @@ pub const SymbolTrie = struct {
                     },
                     .evict => {
                         std.log.info("Evicting {} from {} with hitcount {}", .{ stackItem.hitCount, symbolId, self.nodes.items[symbolId].hitCount });
-                        self.nodes.items[symbolId].hitCount -= stackItem.hitCount;
+                        self.nodes.items[symbolId].hitCount -|= stackItem.hitCount;
                     },
                 }
                 try shadowMap.put(self.allocator, stackId, symbolId);

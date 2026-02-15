@@ -33,7 +33,7 @@ pub fn ThreadSafe(comptime T: type) type {
     };
 }
 
-test "ThreadSafe: concurrent increments maintain correctness" {
+test "lock:ThreadSafe: concurrent increments maintain correctness" {
     const Context = struct {
         safe: *ThreadSafe(u32),
         iterations: u32,

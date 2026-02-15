@@ -304,7 +304,7 @@ pub const RingProfilerApp = struct {
 
         // init tui
         var interface = try Interface.init(allocator, symbols);
-        interface.missed = &profiler.globals.dropped_events;
+        interface.missed = &profiler.globals.map.dropped_events;
         errdefer interface.deinit();
 
         return RingProfilerApp{

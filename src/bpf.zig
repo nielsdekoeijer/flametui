@@ -6,7 +6,7 @@ const c = @import("cimport.zig").c;
 // --------------------------------------------------------------------------------------------------------------------
 /// BPF programs need to be aligned, this function reallocs given data to be in a way that libbpf can load it.
 /// Necessary as @embed-ing the file will not yield correct alignment
-pub fn loadProgramAligned(allocator: std.mem.Allocator, data: []const u8) error{OutOfMemory}![]align(8) const u8 {
+pub fn dupeProgramAligned(allocator: std.mem.Allocator, data: []const u8) error{OutOfMemory}![]align(8) const u8 {
     const code = try allocator.alignedAlloc(u8, .@"8", data.len);
 
     @memcpy(code, data);
@@ -14,16 +14,16 @@ pub fn loadProgramAligned(allocator: std.mem.Allocator, data: []const u8) error{
     return code;
 }
 
-test "bpf.loadProgramAligned returns 8-byte aligned copy" {
+test "bpf.dupeProgramAligned returns 8-byte aligned copy" {
     const input = "hello BPF";
-    const result = try loadProgramAligned(std.testing.allocator, input);
+    const result = try dupeProgramAligned(std.testing.allocator, input);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualSlices(u8, input, result);
     try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
 }
 
-test "bpf.loadProgramAligned handles empty slice" {
-    const result = try loadProgramAligned(std.testing.allocator, "");
+test "bpf.dupeProgramAligned handles empty slice" {
+    const result = try dupeProgramAligned(std.testing.allocator, "");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqual(0, result.len);
     try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
@@ -55,14 +55,14 @@ pub const Object = struct {
     }
 
     test "bpf.Object.init rejects invalid ELF" {
-        const program = try loadProgramAligned(std.testing.allocator, "not a valid elf");
+        const program = try dupeProgramAligned(std.testing.allocator, "not a valid elf");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
     test "bpf.Object.init rejects empty input" {
-        const program = try loadProgramAligned(std.testing.allocator, "");
+        const program = try dupeProgramAligned(std.testing.allocator, "");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
@@ -86,7 +86,7 @@ pub const Object = struct {
 
     pub fn Map(T: type) type {
         return struct {
-            map: *volatile T,
+            map: *align(std.heap.page_size_min) volatile T,
 
             pub fn init(fd: std.posix.fd_t) !@This() {
                 const ptr = try std.posix.mmap(
@@ -99,12 +99,13 @@ pub const Object = struct {
                 );
 
                 return .{
-                    .map = @as(*volatile T, @ptrCast(@alignCast(ptr))),
+                    .map = @as(*align(std.heap.page_size_min) volatile T, @ptrCast(@alignCast(ptr))),
                 };
             }
 
             pub fn deinit(self: *@This()) void {
-                std.posix.munmap(self.map[0..@sizeOf(T)]);
+                const bytes = @as([]align(std.heap.page_size_min) const u8, @ptrCast(@volatileCast(self.map)));
+                std.posix.munmap(bytes);
 
                 self.* = undefined;
             }
@@ -139,12 +140,12 @@ pub const Object = struct {
     pub const Link = struct {
         link: *c.struct_bpf_link,
 
-        pub fn free(self: *Link) void {
+        pub fn deinit(self: *Link) void {
             if (c.bpf_link__destroy(self.link) != 0) {
                 @panic("ebpf link destruction failure");
             }
 
-            self.link = undefined;
+            self.* = undefined;
         }
     };
 
@@ -210,16 +211,16 @@ pub const Object = struct {
             return @intCast(ret);
         }
 
-        pub fn free(self: *RingBuffer) void {
+        pub fn deinit(self: *RingBuffer) void {
             c.ring_buffer__free(self.ringbuffer);
-            self.ringbuffer = undefined;
+            self.* = undefined;
         }
     };
 
     /// Cleanup + invalidate
-    pub fn free(self: *Object) void {
+    pub fn deinit(self: *Object) void {
         c.bpf_object__close(self.internal);
-        self.internal = undefined;
+        self.* = undefined;
     }
 };
 

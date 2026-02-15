@@ -66,7 +66,6 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 Before `0.0.2-alpha`:
 - [ ] Review files ensuring tests in place and happy: 
     - [ ] src/profile.zig  
-    - [ ] src/root.zig  
     - [ ] src/sharedobject.zig 
     - [ ] src/stacktrie.zig  
     - [ ] src/symboltrie.zig  

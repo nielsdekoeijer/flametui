@@ -65,12 +65,9 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 Before `0.0.2-alpha`:
 - [ ] Review files ensuring tests in place and happy: 
-    - [ ] src/profile.zig  
     - [ ] src/sharedobject.zig 
-    - [ ] src/stacktrie.zig  
     - [ ] src/symboltrie.zig  
     - [ ] src/tui.zig  
-    - [ ] src/umap.zig  
 - [ ] Implement `perf script | flametui`.
 - [ ] Fix Bug in Navigation: Navigation is a hack, doesn't work well. Review and fix
 

@@ -9,7 +9,7 @@ pub const Definitions = @cImport(@cInclude("profile_streaming.bpf.h"));
 pub const InstructionPointer = u64;
 
 /// Alias for the kernel type
-pub const PID = u32;
+pub const PID = u64;
 
 /// ===================================================================================================================
 /// Helpers
@@ -20,10 +20,10 @@ pub const EventTypeRaw = u64;
 /// Our parsed view over the raw data, note we dont clone for efficiencies sake
 /// Wire layout (all fields are `u64`):
 /// ```
-///   [0]  pid
+///   [0]  pid | tid
 ///   [1]  timestamp
-///   [2]  user_stack_bytes
-///   [3]  kernel_stack_bytes
+///   [2]  us
+///   [3]  ks
 ///   [4]  user IPs ... kernel IPs
 /// ```
 pub const EventType = struct {
@@ -36,6 +36,8 @@ pub const EventType = struct {
     // We parse from a raw pointer
     pub fn init(raw: *const EventTypeRaw) EventType {
         const ev = @as([*]const u64, @ptrCast(raw));
+
+        // Sizes are given in bytes
         const us = ev[2] / 8;
         const ks = ev[3] / 8;
 
@@ -51,7 +53,7 @@ pub const EventType = struct {
     }
 };
 
-test "EventType.init parses minimal event with empty stacks" {
+test "profile.EventType.init parses minimal event with empty stacks" {
     const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
     const event = EventType.init(@ptrCast(&raw));
     try std.testing.expectEqual(42, event.pid);
@@ -59,7 +61,7 @@ test "EventType.init parses minimal event with empty stacks" {
     try std.testing.expectEqual(0, event.kips.len);
 }
 
-test "EventType.init parses event with user and kernel IPs" {
+test "profile.EventType.init parses event with user and kernel IPs" {
     const raw = [_]u64{
         @as(u64, 1234) << 32 | 5678, // tgid: pid=1234, tid=5678
         99999, // timestamp
@@ -80,7 +82,7 @@ test "EventType.init parses event with user and kernel IPs" {
     try std.testing.expectEqual(0xEEFF, event.kips[0]);
 }
 
-test "EventType.init parses kernel-only stacks" {
+test "profile.EventType.init parses kernel-only stacks" {
     const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
     const event = EventType.init(@ptrCast(&raw));
     try std.testing.expectEqual(99, event.pid);
@@ -97,12 +99,21 @@ const ProfileFunctionName = "do_sample";
 /// Wrapper around our profiling ebpf program
 pub const Profiler = struct {
     allocator: std.mem.Allocator,
+
+    // Owned copy of our bpf code
     bytecode: []align(8) const u8,
+
+    // Wrapper around a bpf object
     object: bpf.Object,
-    links: []bpf.Object.Link,
+
+    // Connections of our bpf object, stays alive
+    links: ?[]bpf.Object.Link,
+
+    // Ringbuffer inside our ebpf program
     ring: bpf.Object.RingBuffer,
+
+    // Global values for our bpf object
     globals: bpf.Object.Map(Definitions.globals_t),
-    running: bool = false,
 
     pub fn init(
         comptime ContextType: type,
@@ -114,38 +125,56 @@ pub const Profiler = struct {
         bpf.setupLoggerBackend(.zig);
 
         // Load our embedded code into an byte array with 8 byte alignment
-        const code = try bpf.loadProgramAligned(allocator, Program.bytecode);
+        const code = try bpf.dupeProgramAligned(allocator, Program.bytecode);
         errdefer allocator.free(code);
 
         // Use my bpf "library" to wrap the Object
         var object = try bpf.Object.init(code);
-        errdefer object.free();
-
-        // Create links
-        const cpuCount = try std.Thread.getCpuCount();
-        const links = try allocator.alloc(bpf.Object.Link, cpuCount);
-        errdefer allocator.free(links);
+        errdefer object.deinit();
 
         // Create ringbuffer
-        const ring = try object.findRingBuffer(ContextType, EventTypeRaw, handler, context, "events");
+        var ring = try object.findRingBuffer(ContextType, EventTypeRaw, handler, context, "events");
+        errdefer ring.deinit();
 
         // Global from the program
-        const globals = try object.getMapPointer("globals_map", Definitions.globals_t);
+        var globals = try object.getMapPointer("globals_map", Definitions.globals_t);
+        errdefer globals.deinit();
 
         return Profiler{
             .allocator = allocator,
             .bytecode = code,
             .object = object,
-            .links = links,
+            .links = null,
             .ring = ring,
             .globals = globals,
         };
     }
 
+    pub fn deinit(self: *Profiler) void {
+        // Frees the links, servering the connection
+        self.stop();
+
+        // Destroy links
+        self.globals.deinit();
+        self.ring.deinit();
+        self.object.deinit();
+
+        self.allocator.free(self.bytecode);
+    }
+
     /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
     /// the connection.
     pub fn start(self: *Profiler, rate: usize) !void {
+        if (self.links) |_| {
+            return error.ProfilerStartingWhileStarted;
+        }
+
         const pid = -1;
+
+        // Create links
+        const cpuCount = try std.Thread.getCpuCount();
+        const links = try self.allocator.alloc(bpf.Object.Link, cpuCount);
+        errdefer self.allocator.free(links);
 
         // Open perf events
         std.log.info("Starting perf event with rate {} and pid {}", .{ rate, pid });
@@ -162,7 +191,11 @@ pub const Profiler = struct {
         const program = try self.object.findProgram(ProfileFunctionName);
 
         // Attach programs to each cpu
-        for (0..self.links.len) |i| {
+        for (0..links.len) |i| {
+            errdefer {
+                for (0..i) |j| links[j].deinit();
+            }
+
             const fd = blk: {
                 const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, @intCast(pid), @intCast(i), -1, 0));
 
@@ -172,33 +205,25 @@ pub const Profiler = struct {
 
                 break :blk @as(i32, @intCast(pfd));
             };
-
-            self.links[i] = program.attachPerfEvent(fd) catch |err| {
-                for (0..i) |j| self.links[j].free();
+            errdefer {
                 std.posix.close(fd);
-                return err;
-            };
+            }
+
+            links[i] = try program.attachPerfEvent(fd);
         }
 
-        self.running = true;
+        self.links = links;
     }
 
     /// Stop running by detaching the link
     pub fn stop(self: *Profiler) void {
-        if (self.running) {
-            for (self.links) |*link| {
-                link.free();
+        if (self.links) |links| {
+            for (links) |*link| {
+                link.deinit();
             }
+
+            self.allocator.free(links);
+            self.links = null;
         }
-
-        self.running = false;
-    }
-
-    pub fn deinit(self: *Profiler) void {
-        self.stop();
-        self.allocator.free(self.links);
-        self.ring.free();
-        self.object.free();
-        self.allocator.free(self.bytecode);
     }
 };

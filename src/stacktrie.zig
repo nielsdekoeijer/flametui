@@ -157,13 +157,25 @@ pub const StackTrie = struct {
                 parent = @intCast(index);
             } else {
                 // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntry
-                const umap: *UMapUnmanaged = try umapCache.find(pid);
-                const item: UMapEntry = switch (umap.find(ip)) {
-                    // If the entry exists in the map, great, clone it
-                    .found => |it| try it.clone(self.allocator),
+                const umap = try umapCache.find(pid);
+                const item: UMapEntry = switch (umap.*) {
+                    .loaded => |entry| if (entry.find(ip)) |e|
+                        try e.clone(self.allocator)
+                    else
+                        UMapEntry{
+                            .path = try self.allocator.dupe(u8, "not found"),
+                            .offset = 0,
+                            .addressBeg = 0,
+                            .addressEnd = 0,
+                        },
 
-                    // Else return a fixed map
-                    .notfound, .unmapped => try UMapUnmanaged.UMapEntryUnmapped.clone(self.allocator),
+                    // TODO: we flatten our typesystem here, can be improved
+                    .zombie => UMapEntry{
+                        .path = try self.allocator.dupe(u8, "zombie"),
+                        .offset = 0,
+                        .addressBeg = 0,
+                        .addressEnd = 0,
+                    },
                 };
 
                 // Append it to self

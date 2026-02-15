@@ -82,13 +82,6 @@ test "tryDemangleOrDupe handles empty string" {
 /// ===================================================================================================================
 /// Trie for tracking incoming stacktraces
 pub const SymbolTrie = struct {
-    /// The different entry types in our trie
-    pub const TrieKind = enum {
-        root,
-        kernel,
-        user,
-    };
-
     /// What we store in a trie for a kernel stack frame
     pub const KTriePayload = struct {
         symbol: []const u8,
@@ -101,7 +94,7 @@ pub const SymbolTrie = struct {
     };
 
     /// Trie union, datatype we store in the trie
-    pub const TriePayload = union(TrieKind) {
+    pub const TriePayload = union(enum) {
         root: KTriePayload,
         kernel: KTriePayload,
         user: UTriePayload,

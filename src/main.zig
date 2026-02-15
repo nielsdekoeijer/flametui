@@ -59,15 +59,6 @@ const Options = struct {
     /// Options per command
     command: CommandOptions,
 
-    /// Commands
-    const Command = enum {
-        fixed,
-        aggregate,
-        ring,
-        file,
-        stdin,
-    };
-
     /// General options
     const GeneralOptions = struct {
         verbose: bool = false,
@@ -75,7 +66,7 @@ const Options = struct {
     };
 
     /// Commands with args
-    const CommandOptions = union(Command) {
+    const CommandOptions = union(enum) {
         fixed: struct {
             hz: usize = 49,
             ms: u64 = 1000,

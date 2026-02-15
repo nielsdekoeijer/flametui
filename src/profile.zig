@@ -101,7 +101,7 @@ pub const Profiler = struct {
     object: bpf.Object,
     links: []bpf.Object.Link,
     ring: bpf.Object.RingBuffer,
-    globals: *volatile Definitions.globals_t,
+    globals: bpf.Object.Map(Definitions.globals_t),
     running: bool = false,
 
     pub fn init(

@@ -14,7 +14,7 @@ pub fn loadProgramAligned(allocator: std.mem.Allocator, data: []const u8) error{
     return code;
 }
 
-test "loadProgramAligned returns 8-byte aligned copy" {
+test "bpf.loadProgramAligned returns 8-byte aligned copy" {
     const input = "hello BPF";
     const result = try loadProgramAligned(std.testing.allocator, input);
     defer std.testing.allocator.free(result);
@@ -22,7 +22,7 @@ test "loadProgramAligned returns 8-byte aligned copy" {
     try std.testing.expect(@intFromPtr(result.ptr) % 8 == 0);
 }
 
-test "loadProgramAligned handles empty slice" {
+test "bpf.loadProgramAligned handles empty slice" {
     const result = try loadProgramAligned(std.testing.allocator, "");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqual(0, result.len);
@@ -54,23 +54,23 @@ pub const Object = struct {
         return .{ .internal = internal };
     }
 
-    test "Object.init rejects invalid ELF" {
+    test "bpf.Object.init rejects invalid ELF" {
         const program = try loadProgramAligned(std.testing.allocator, "not a valid elf");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    test "Object.init rejects empty input" {
+    test "bpf.Object.init rejects empty input" {
         const program = try loadProgramAligned(std.testing.allocator, "");
         defer std.testing.allocator.free(program);
         setupLoggerBackend(.none);
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    /// Get a pointer to a specific single-value BPF map. Note that the access will NOT be atomic. For my current 
+    /// Get a pointer to a specific single-value BPF map. Note that the access will NOT be atomic. For my current
     /// purposes, we only write once on init. The missed count we read though, this could hit race condition.
-    pub fn getMapPointer(self: Object, name: [:0]const u8, comptime T: type) !*volatile T {
+    pub fn getMapPointer(self: Object, name: [:0]const u8, comptime T: type) !Map(T) {
         const map = c.bpf_object__find_map_by_name(self.internal, name) orelse return error.MapNotFound;
 
         const value_size = c.bpf_map__value_size(map);
@@ -81,16 +81,34 @@ pub const Object = struct {
         const fd = c.bpf_map__fd(map);
         if (fd < 0) return error.MapNotMapped;
 
-        const ptr = try std.posix.mmap(
-            null,
-            @sizeOf(T),
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            fd,
-            0,
-        );
+        return try Map(T).init(fd);
+    }
 
-        return @as(*volatile T, @ptrCast(@alignCast(ptr)));
+    pub fn Map(T: type) type {
+        return struct {
+            map: *volatile T,
+
+            pub fn init(fd: std.posix.fd_t) !@This() {
+                const ptr = try std.posix.mmap(
+                    null,
+                    @sizeOf(T),
+                    std.posix.PROT.READ | std.posix.PROT.WRITE,
+                    .{ .TYPE = .SHARED },
+                    fd,
+                    0,
+                );
+
+                return .{
+                    .map = @as(*volatile T, @ptrCast(@alignCast(ptr))),
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                std.posix.munmap(self.map[0..@sizeOf(T)]);
+
+                self.* = undefined;
+            }
+        };
     }
 
     /// Get a program contained within the object

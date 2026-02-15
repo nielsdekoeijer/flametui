@@ -36,16 +36,16 @@ fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
 }
 
 fn configureProfiler(profiler: anytype, general: Options.GeneralOptions, pid: ?[]i32) void {
-    profiler.globals.enable_idle = if (general.enable_idle) 1 else 0;
+    profiler.globals.map.enable_idle = if (general.enable_idle) 1 else 0;
 
     if (pid) |p| {
         const len = @min(32, p.len);
         for (0..len) |i| {
-            profiler.globals.pids[i] = @intCast(p[i]);
+            profiler.globals.map.pids[i] = @intCast(p[i]);
         }
-        profiler.globals.pids_len = len;
+        profiler.globals.map.pids_len = len;
     } else {
-        profiler.globals.pids_len = 0;
+        profiler.globals.map.pids_len = 0;
     }
 }
 

@@ -10,6 +10,7 @@ pub const InstructionPointer = u64;
 
 /// Alias for the kernel type
 pub const PID = u64;
+pub const TID = u64;
 
 /// ===================================================================================================================
 /// Helpers

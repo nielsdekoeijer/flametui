@@ -2,6 +2,8 @@ const std = @import("std");
 const KMap = @import("kmap.zig").KMap;
 const StackTrie = @import("stacktrie.zig").StackTrie;
 const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
+const PID = @import("profile.zig").PID;
+const TID = @import("profile.zig").TID;
 const c = @import("cimport.zig").c;
 
 /// ===================================================================================================================
@@ -95,9 +97,12 @@ pub const SymbolTrie = struct {
 
     /// Trie union, datatype we store in the trie
     pub const TriePayload = union(enum) {
+        user: UTriePayload,
         root: KTriePayload,
         kernel: KTriePayload,
-        user: UTriePayload,
+        comm: KTriePayload,
+        pid: KTriePayload,
+        tid: KTriePayload,
     };
 
     /// Our node type
@@ -565,10 +570,15 @@ pub const SymbolTrie = struct {
             const parentId = shadowMap.get(stackItem.parent) orelse return error.ShadowMapError;
 
             // Find the symbol based on the type of node
-            var isfound = false;
+            var isduped = false;
             const symbol = switch (stackItem.payload) {
                 // Root is just given
                 .root => "root",
+                // Comm node
+                .comm => |e| blk: {
+                    isduped = true;
+                    break :blk try self.allocator.dupe(u8, e);
+                },
                 // Use our kmap to resolve the symbol
                 // TODO: we throw, do we want to do this differently?
                 .kernel => |e| blk: {
@@ -582,17 +592,25 @@ pub const SymbolTrie = struct {
                     const s = try self.sharedObjectMapCache.find(p.path);
                     switch (s.find(e.umapip, p)) {
                         .found => |w| {
-                            isfound = true;
+                            isduped = true;
                             break :blk try tryDemangleOrDupe(self.allocator, w.name);
                         },
                         .notfound => break :blk "notfound",
                         .unmapped => break :blk "unmapped",
                     }
                 },
+                .pid => |e| blk: {
+                    isduped = true;
+                    break :blk try std.fmt.allocPrint(self.allocator, "pid: {d}", .{e});
+                },
+                .tid => |e| blk: {
+                    isduped = true;
+                    break :blk try std.fmt.allocPrint(self.allocator, "tid: {d}", .{e});
+                },
             };
 
             defer {
-                if (isfound) {
+                if (isduped) {
                     self.allocator.free(symbol);
                 }
             }
@@ -635,6 +653,24 @@ pub const SymbolTrie = struct {
                                         .symbol = try self.allocator.dupe(u8, symbol),
                                     },
                                 },
+                                .comm, => break :blk TriePayload{
+                                    .comm = .{
+                                        // take the symbol + dupe, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                    },
+                                },
+                                .pid , => break :blk TriePayload{
+                                    .pid = .{
+                                        // take the symbol + dupe, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                    },
+                                },
+                                .tid , => break :blk TriePayload{
+                                    .tid = .{
+                                        // take the symbol + dupe, takes ownership!
+                                        .symbol = try self.allocator.dupe(u8, symbol),
+                                    },
+                                },
                                 .user => |e| break :blk TriePayload{
                                     .user = .{
                                         // take the symbol, takes ownership!
@@ -673,7 +709,7 @@ pub const SymbolTrie = struct {
         for (self.nodes.items) |*node| {
             node.children.deinit(self.allocator);
             switch (node.payload) {
-                .kernel, .root => |s| self.allocator.free(s.symbol),
+                .kernel, .root, .comm, .pid, .tid, => |s| self.allocator.free(s.symbol),
                 .user => |s| {
                     self.allocator.free(s.symbol);
                     self.allocator.free(s.dll);

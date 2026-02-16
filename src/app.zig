@@ -50,15 +50,14 @@ const RingProfilerContext = struct {
         const parsed = EventType.init(event);
 
         if (context.binStartNanoseconds) |*binStartNanoseconds| {
-            if (parsed.timestamp >= binStartNanoseconds.* +| context.binDurationNanoseconds) {
-                const elapsed = parsed.timestamp - binStartNanoseconds.*;
-                const bins_elapsed = elapsed / context.binDurationNanoseconds;
-
-                binStartNanoseconds.* += bins_elapsed * context.binDurationNanoseconds;
+            while (parsed.timestamp >= binStartNanoseconds.* +| context.binDurationNanoseconds) {
+                binStartNanoseconds.* += context.binDurationNanoseconds;
 
                 if (context.ring.progressWriterHead()) |new| {
                     context.iptrie = new;
                     context.iptrie.reset();
+                } else {
+                    break;
                 }
             }
         } else {

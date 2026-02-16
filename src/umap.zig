@@ -176,7 +176,7 @@ pub const UMapUnmanaged = union(enum) {
             });
 
             const umap = UMapUnmanaged{
-                .loaded = .{ .backend = backend },
+                .loaded = .{ .backend = backend, .name = "test" },
             };
 
             {
@@ -211,7 +211,7 @@ pub const UMapUnmanaged = union(enum) {
             });
 
             const umap = UMapUnmanaged{
-                .loaded = .{ .backend = backend },
+                .loaded = .{ .backend = backend, .name = "test" },
             };
 
             {
@@ -288,7 +288,7 @@ pub const UMapUnmanaged = union(enum) {
 
         // Read the whole file in 1 go
         const content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch {
-            allocator.free(name); 
+            allocator.free(name);
             return .zombie;
         };
         defer allocator.free(content);

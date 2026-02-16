@@ -392,6 +392,15 @@ pub const Interface = struct {
     /// Missed (maybe)
     missed: ?*const volatile u64 = null,
 
+    // Add to Interface struct fields, near symbolActive
+    sortMode: SortMode = .alphabetical,
+
+    // Add at file scope (near the other helpers)
+    pub const SortMode = enum { none, alphabetical, hitcount };
+
+    // Total number that can be sorted, just because we only statically alloc
+    const MaxSortableChildren = 512;
+
     // Bare-bones init
     pub fn init(allocator: std.mem.Allocator, symbols: *SymbolTrieList) !Interface {
         const len = symbols.list.lock().len;
@@ -523,6 +532,15 @@ pub const Interface = struct {
                             std.log.info("{} {}", .{ self.symbolActive, self.symbolTotal });
                             self.selectedNodeId = SymbolTrie.RootId;
                             self.highlightedNodeId = null;
+                        }
+
+                        // EXPORT: toggle sort mode
+                        if (key.matches('t', .{})) {
+                            self.sortMode = switch (self.sortMode) {
+                                .none => .alphabetical,
+                                .alphabetical => .hitcount,
+                                .hitcount => .none,
+                            };
                         }
 
                         // EXPORT: e
@@ -870,9 +888,17 @@ pub const Interface = struct {
         };
 
         const title = if (self.missed) |m|
-            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph [{}/{}] (dropped: {})", .{ self.symbolActive + 1, self.symbolTotal, m.* })
+            try std.fmt.bufPrint(
+                &self.titleBuf,
+                "FlameGraph [{}/{}] (dropped: {}) (sort: {s})",
+                .{ self.symbolActive + 1, self.symbolTotal, m.*, @tagName(self.sortMode) },
+            )
         else
-            try std.fmt.bufPrint(&self.titleBuf, "FlameGraph [{}/{}]", .{ self.symbolActive + 1, self.symbolTotal });
+            try std.fmt.bufPrint(
+                &self.titleBuf,
+                "FlameGraph [{}/{}] (sort: {s})",
+                .{ self.symbolActive + 1, self.symbolTotal, @tagName(self.sortMode)  },
+            );
 
         // Draw the flamegraph box
         drawBorder(
@@ -1001,7 +1027,9 @@ pub const Interface = struct {
         }
 
         var childOffset: f32 = context.offsetNormalized;
-        for (entry.children.items) |id| {
+        var sortBuf: [MaxSortableChildren]SymbolTrie.NodeId = undefined;
+        const children = self.sortedChildren(nodes, entry.children.items, &sortBuf);
+        for (children) |id| {
             // Safe to dereferences as we checked it before
             const child = nodes[id];
 
@@ -1114,7 +1142,9 @@ pub const Interface = struct {
         }
 
         var childOffset: f32 = context.offsetNormalized;
-        for (entry.children.items) |id| {
+        var sortBuf: [MaxSortableChildren]SymbolTrie.NodeId = undefined;
+        const children = self.sortedChildren(nodes, entry.children.items, &sortBuf);
+        for (children) |id| {
             // Safe to dereferences as we checked it before
             const child = nodes[id];
 
@@ -1134,5 +1164,45 @@ pub const Interface = struct {
 
             childOffset += childWidth;
         }
+    }
+
+    fn sortedChildren(
+        self: *Interface,
+        nodes: []SymbolTrie.TrieNode,
+        children: []const SymbolTrie.NodeId,
+        buf: *[MaxSortableChildren]SymbolTrie.NodeId,
+    ) []SymbolTrie.NodeId {
+        if (children.len == 0) return &.{};
+        if (self.sortMode == .none) return @constCast(children);
+        if (children.len > MaxSortableChildren) return @constCast(children);
+
+        const slice = buf[0..children.len];
+        @memcpy(slice, children);
+
+        switch (self.sortMode) {
+            .none => unreachable,
+            .alphabetical => {
+                std.sort.block(SymbolTrie.NodeId, slice, nodes, struct {
+                    fn lessThan(ctx: []SymbolTrie.TrieNode, a: SymbolTrie.NodeId, b: SymbolTrie.NodeId) bool {
+                        const symA: []const u8 = switch (ctx[a].payload) {
+                            inline else => |s| s.symbol,
+                        };
+                        const symB: []const u8 = switch (ctx[b].payload) {
+                            inline else => |s| s.symbol,
+                        };
+                        return std.mem.order(u8, symA, symB) == .lt;
+                    }
+                }.lessThan);
+            },
+            .hitcount => {
+                std.sort.block(SymbolTrie.NodeId, slice, nodes, struct {
+                    fn lessThan(ctx: []SymbolTrie.TrieNode, a: SymbolTrie.NodeId, b: SymbolTrie.NodeId) bool {
+                        return ctx[a].hitCount > ctx[b].hitCount;
+                    }
+                }.lessThan);
+            },
+        }
+
+        return slice;
     }
 };

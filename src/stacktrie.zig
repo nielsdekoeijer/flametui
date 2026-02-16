@@ -378,17 +378,17 @@ pub const StackTrie = struct {
 
         try trie.add(event, &cache);
 
-        // root + 2 kernel frames
-        try std.testing.expectEqual(3, trie.nodes.items.len);
+        // root + 2 kernel frames + pid/tid/comm
+        try std.testing.expectEqual(6, trie.nodes.items.len);
         try std.testing.expectEqual(1, trie.nodes.items[StackTrie.RootId].hitCount);
 
         // Deepest kernel frame (0xBBBB, added first since reversed) is child of root
         try std.testing.expectEqual(StackTrie.RootId, trie.nodes.items[1].parent);
-        try std.testing.expectEqual(0xBBBB, trie.nodes.items[1].payload.kernel.kmapip);
+        try std.testing.expectEqual(0xBBBB, trie.nodes.items[4].payload.kernel.kmapip);
 
         // 0xAAAA is child of 0xBBBB's node
         try std.testing.expectEqual(1, trie.nodes.items[2].parent);
-        try std.testing.expectEqual(0xAAAA, trie.nodes.items[2].payload.kernel.kmapip);
+        try std.testing.expectEqual(0xAAAA, trie.nodes.items[5].payload.kernel.kmapip);
     }
 
     test "stacktrie.StackTrie add duplicate kernel event increments hit counts" {
@@ -409,10 +409,10 @@ pub const StackTrie = struct {
         try trie.add(event, &cache);
         try trie.add(event, &cache);
 
-        // Still only root + 1 kernel node (deduped)
-        try std.testing.expectEqual(2, trie.nodes.items.len);
+        // Still only root + 1 kernel node (deduped) + pid/tid/comm
+        try std.testing.expectEqual(5, trie.nodes.items.len);
         try std.testing.expectEqual(2, trie.nodes.items[StackTrie.RootId].hitCount);
-        try std.testing.expectEqual(2, trie.nodes.items[1].hitCount);
+        try std.testing.expectEqual(2, trie.nodes.items[4].hitCount);
     }
 
     test "stacktrie.StackTrie different PIDs create distinct nodes for same IP" {
@@ -426,8 +426,8 @@ pub const StackTrie = struct {
             try trie.add(.{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} }, &cache);
         }
 
-        // root + 2 separate kernel nodes
-        try std.testing.expectEqual(3, trie.nodes.items.len);
+        // root + 2 separate kernel nodes + pid/tid/comm each
+        try std.testing.expectEqual(9, trie.nodes.items.len);
         try std.testing.expectEqual(2, trie.nodes.items[StackTrie.RootId].hitCount);
     }
 

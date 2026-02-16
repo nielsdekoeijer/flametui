@@ -56,6 +56,7 @@ sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
 zig-out/bin/flametui file out.collapsed
 ```
 
+***(Note: CURRENTLY BROKEN)***
 Note that you can **click on the nodes** to expand the view! You can also navigate with keyboard:
 **hjkl** / **WASD** / **arrow keys** to move, **Enter** to zoom in, **Escape** to unzoom, **q** to quit.
 
@@ -68,8 +69,6 @@ Before `0.0.2-alpha`:
     - [ ] src/sharedobject.zig 
     - [ ] src/symboltrie.zig  
     - [ ] src/tui.zig  
-- [ ] Implement `perf script | flametui`.
-- [ ] Fix Bug in Navigation: Navigation is a hack, doesn't work well. Review and fix
 
 There are several areas where this project could be improved:
 
@@ -87,6 +86,8 @@ There are several areas where this project could be improved:
         I'm sure I can cook harder now that I have the basics down
 - [ ] **Vendoring as Library**:
         Plug into build.zig to have an e.g. `zig build profile` step.
+- [ ] **Fix Bug in Navigation:**
+        Navigation is a hack, doesn't work well. Review and fix
 - [ ] **Improved error Handling**:
         Currently we have `UNMAPPED` as our only indication, we can be more robust.
 - [ ] **CI/CD for Release**:

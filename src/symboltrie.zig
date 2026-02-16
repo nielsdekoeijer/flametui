@@ -248,7 +248,6 @@ pub const SymbolTrie = struct {
 
                         // This grabs the dll
                         const dllBracketed = iter.next() orelse return error.StackParsingFailure;
-
                         const dll = std.mem.trim(u8, dllBracketed, "()");
 
                         std.log.debug("Parsed user symbol '{s}' and dll '{s}'", .{ symbol, dll });
@@ -291,12 +290,10 @@ pub const SymbolTrie = struct {
                         try self.nodes.append(self.allocator, TrieNode{
                             .hitCount = 1,
                             .parent = parentId,
-                            .payload = .{
-                                .user = .{
-                                    .symbol = try tryDemangleOrDupe(self.allocator, payload.items[j].symbol),
-                                    .dll = try self.allocator.dupe(u8, payload.items[j].dll),
-                                }
-                            },
+                            .payload = .{ .user = .{
+                                .symbol = try tryDemangleOrDupe(self.allocator, payload.items[j].symbol),
+                                .dll = try self.allocator.dupe(u8, payload.items[j].dll),
+                            } },
                             .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
                         });
 
@@ -313,7 +310,6 @@ pub const SymbolTrie = struct {
                         parentId = nodeId;
                     }
                 }
-
 
                 allocator.free(head orelse unreachable);
                 head = null;

@@ -243,12 +243,14 @@ pub const SharedObjectMap = struct {
 
                             // This is odd: it breaks without this, although I think it makes sense.
                             // TODO: Read elf header documentation to try to understand what I'm actually doing
-                            // if (symbol.st_size == 0) continue;
                             const name = std.mem.sliceTo(stringTable[symbol.st_name..], 0);
+
+                            // TODO: Verify that this is correct
+                            if (symbol.st_value == 0 and symbol.st_size == 0) continue;
                             try symbols.append(allocator, .{
                                 .addr = symbol.st_value,
                                 .size = @intCast(symbol.st_size),
-                                .name = name,
+                                .name = if (name.len > 0) name else "<anonymous>",
                             });
                         }
                     }

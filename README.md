@@ -44,16 +44,9 @@ sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)"
 
 If you dont want to use my profiler (I must admit it is janky), you can also try doing something like:
 ```bash
-# Get the tools (normally the slighly annoying part)
-git clone https://github.com/brendangregg/FlameGraph
-
 # Record + collapse stack traces
 sudo perf record -F 99 -a -g -- sleep 5
-sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
-
-# Plot them in the TUI!!
-# NOTE: this records the number of cycles rather than the hit count, but the app still works
-zig-out/bin/flametui file out.collapsed
+sudo perf script | zig-out/bin/flametui
 ```
 
 ***(Note: CURRENTLY BROKEN, thus disabled)***

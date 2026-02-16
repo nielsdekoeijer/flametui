@@ -125,6 +125,7 @@ pub const UMapEntry = struct {
 pub const UMapUnmanaged = union(enum) {
     loaded: struct {
         backend: std.ArrayListUnmanaged(UMapEntry),
+        name: []const u8,
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             for (self.backend.items) |item| {
@@ -132,6 +133,7 @@ pub const UMapUnmanaged = union(enum) {
             }
 
             self.backend.deinit(allocator);
+            allocator.free(self.name);
 
             self.* = undefined;
         }
@@ -216,7 +218,6 @@ pub const UMapUnmanaged = union(enum) {
                 var uut = try umap.loaded.findAndDupe(std.testing.allocator, 0x1500);
                 if (uut) |*entry| {
                     defer entry.deinit(std.testing.allocator);
-
                 } else {
                     return error.TestUnexpectedResult;
                 }
@@ -236,6 +237,40 @@ pub const UMapUnmanaged = union(enum) {
             backend.deinit(allocator);
         }
 
+        // Retrieve name / comm
+        // NOTE: pure shit vibe code
+        const name = blk: {
+            var pathBuffer: [256]u8 = undefined;
+            const exe_path = std.fmt.bufPrint(&pathBuffer, "/proc/{}/exe", .{pid}) catch break :blk try allocator.dupe(u8, "unknown");
+
+            var linkBuffer: [std.fs.max_path_bytes]u8 = undefined;
+            const full = std.posix.readlinkat(std.posix.AT.FDCWD, exe_path, &linkBuffer) catch {
+                // Fallback to comm
+                var commPathBuf: [256]u8 = undefined;
+                const comm_path = std.fmt.bufPrint(&commPathBuf, "/proc/{}/comm", .{pid}) catch break :blk try allocator.dupe(u8, "unknown");
+                const file = std.fs.openFileAbsolute(comm_path, .{}) catch break :blk try allocator.dupe(u8, "unknown");
+                defer file.close();
+                var nameBuffer: [16]u8 = undefined;
+                const amt = file.readAll(&nameBuffer) catch break :blk try allocator.dupe(u8, "unknown");
+                const raw = std.mem.trimRight(u8, nameBuffer[0..amt], "\n\x00 ");
+                break :blk try allocator.dupe(u8, if (raw.len > 0) raw else "unknown");
+            };
+
+            const basename = if (std.mem.lastIndexOfScalar(u8, full, '/')) |idx|
+                full[idx + 1 ..]
+            else
+                full;
+
+            const cleaned = if (std.mem.endsWith(u8, basename, " (deleted)"))
+                basename[0 .. basename.len - " (deleted)".len]
+            else
+                basename;
+
+            if (cleaned.len == 0) break :blk try allocator.dupe(u8, "unknown");
+            break :blk try allocator.dupe(u8, cleaned);
+        };
+        errdefer allocator.free(name);
+
         // Open a file to /proc/*/maps
         const file = blk: {
             // NOTE: we are bounding the length of our path to be 256 here, probably sufficient.
@@ -244,12 +279,18 @@ pub const UMapUnmanaged = union(enum) {
 
             // It can happen that while we're starting, a process dies. Then we can't load it. In which case we
             // return this "unloaded".
-            break :blk std.fs.openFileAbsolute(path, .{}) catch return .zombie;
+            break :blk std.fs.openFileAbsolute(path, .{}) catch {
+                allocator.free(name);
+                return .zombie;
+            };
         };
         defer file.close();
 
         // Read the whole file in 1 go
-        const content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch return .zombie;
+        const content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch {
+            allocator.free(name); 
+            return .zombie;
+        };
         defer allocator.free(content);
 
         // Reader for said file contents
@@ -264,6 +305,7 @@ pub const UMapUnmanaged = union(enum) {
         return .{
             .loaded = .{
                 .backend = backend,
+                .name = name,
             },
         };
     }

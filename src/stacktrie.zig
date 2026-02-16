@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const PID = @import("profile.zig").PID;
+const TID = @import("profile.zig").TID;
 const InstructionPointer = @import("profile.zig").InstructionPointer;
 
 const UMapEntry = @import("umap.zig").UMapEntry;
@@ -34,14 +35,17 @@ pub const StackTrie = struct {
     const TrieKind = enum {
         /// Should only have one of these
         root,
+        /// Name of proc
+        comm,
+        /// The pid
+        pid,
+        /// The tid
+        tid,
         /// Coming from the kernel stack
         kernel,
         /// Coming from the userspace stack
         user,
     };
-
-    /// What we store in a trie for a given a root stack frame
-    pub const RTriePayload = void;
 
     /// What we store in a trie for a given kernel stack frame
     pub const KTriePayload = struct {
@@ -59,7 +63,10 @@ pub const StackTrie = struct {
 
     /// Trie union, datatype we store in the trie
     pub const TriePayload = union(TrieKind) {
-        root: RTriePayload,
+        root: void,
+        comm: []const u8,
+        pid: PID,
+        tid: TID,
         kernel: KTriePayload,
         user: UTriePayload,
     };
@@ -77,7 +84,7 @@ pub const StackTrie = struct {
     /// Key used for our trie, describes a node uniquely. We also store the kind in case of a degenerate corner case
     /// for a userspace and kernespace instruction pointer collision. Probably the heatdeath of the universe comes
     /// first though.
-    pub const Key = struct { pid: PID, parent: NodeId, ip: InstructionPointer, kind: TrieKind };
+    pub const Key = struct { pid: PID, tid: TID, parent: NodeId, ip: InstructionPointer, kind: TrieKind };
 
     /// Contains the entries of the umaps that are in the trie. This is indexed by the UmapId. After resolving a
     /// UMapEntry from the UMapCache, we place a copy in this umaps, owning a copy of it. This is critical because
@@ -129,6 +136,14 @@ pub const StackTrie = struct {
     /// Adds an event to the trie
     pub fn add(self: *StackTrie, event: EventType, umapCache: *UMapCache) !void {
         const pid = @as(PID, @intCast(event.pid));
+        const tid = @as(TID, @intCast(event.tid));
+
+        // Obtain the umap
+        const umap = try umapCache.find(pid);
+        const comm = switch (umap.*) {
+            .loaded => |u| u.name,
+            .zombie => "nocomm",
+        };
 
         // A stack trace starts at the root.
         var parent: NodeId = RootId;
@@ -136,6 +151,101 @@ pub const StackTrie = struct {
         // Each node comes from the parent node. Thus, we increment its hit count
         self.nodes.items[RootId].hitCount += 1;
 
+        // Next, we add the comm node
+        {
+            const key = Key{ .kind = .comm, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
+
+            const found = self.nodesLookup.get(key);
+            if (found) |index| {
+                // Hit! Update hitcount of parent that was found
+                self.nodes.items[index].hitCount += 1;
+
+                // Update parent to self for next node
+                parent = @intCast(index);
+            } else {
+                // Add a new node
+                try self.nodes.append(self.allocator, TrieNode{
+                    .hitCount = 1,
+                    .parent = parent,
+                    .payload = TriePayload{
+                        .comm = try self.allocator.dupe(u8, comm),
+                    },
+                });
+
+                // We compute the NodeId from the length of the node list
+                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+                // Add the id to the hash map for the given key
+                try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                // Update parent to be new node
+                parent = nodeId;
+            }
+        }
+
+        // Next, we add the pid node
+        {
+            const key = Key{ .kind = .pid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
+
+            const found = self.nodesLookup.get(key);
+            if (found) |index| {
+                // Hit! Update hitcount of parent that was found
+                self.nodes.items[index].hitCount += 1;
+
+                // Update parent to self for next node
+                parent = @intCast(index);
+            } else {
+                // Add a new node
+                try self.nodes.append(self.allocator, TrieNode{
+                    .hitCount = 1,
+                    .parent = parent,
+                    .payload = TriePayload{
+                        .pid = pid,
+                    },
+                });
+
+                // We compute the NodeId from the length of the node list
+                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+                // Add the id to the hash map for the given key
+                try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                // Update parent to be new node
+                parent = nodeId;
+            }
+        }
+
+        // Next, we add the tid node
+        {
+            const key = Key{ .kind = .tid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
+
+            const found = self.nodesLookup.get(key);
+            if (found) |index| {
+                // Hit! Update hitcount of parent that was found
+                self.nodes.items[index].hitCount += 1;
+
+                // Update parent to self for next node
+                parent = @intCast(index);
+            } else {
+                // Add a new node
+                try self.nodes.append(self.allocator, TrieNode{
+                    .hitCount = 1,
+                    .parent = parent,
+                    .payload = TriePayload{
+                        .tid = tid,
+                    },
+                });
+
+                // We compute the NodeId from the length of the node list
+                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+                // Add the id to the hash map for the given key
+                try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                // Update parent to be new node
+                parent = nodeId;
+            }
+        }
         // Resolve user stack frames. We consider them in reverse as that is the one closest to the root node.
         var i = event.uips.len;
         while (i > 0) {
@@ -145,7 +255,7 @@ pub const StackTrie = struct {
             const ip = event.uips[i];
 
             // Build key
-            const key = Key{ .kind = .user, .pid = pid, .parent = parent, .ip = ip };
+            const key = Key{ .kind = .user, .pid = pid, .tid = tid, .parent = parent, .ip = ip };
 
             // Check if key exists
             const found = self.nodesLookup.get(key);
@@ -157,7 +267,6 @@ pub const StackTrie = struct {
                 parent = @intCast(index);
             } else {
                 // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntry
-                const umap = try umapCache.find(pid);
                 var item: UMapEntry = switch (umap.*) {
                     .loaded => |entry| if (try entry.findAndDupe(self.allocator, ip)) |e|
                         e
@@ -177,6 +286,7 @@ pub const StackTrie = struct {
                         .addressEnd = 0,
                     },
                 };
+
                 errdefer item.deinit(self.allocator);
 
                 // Append it to self
@@ -217,7 +327,7 @@ pub const StackTrie = struct {
             const ip = event.kips[j];
 
             // Build the key
-            const key = Key{ .kind = .kernel, .pid = pid, .parent = parent, .ip = ip };
+            const key = Key{ .kind = .kernel, .pid = pid, .tid = tid, .parent = parent, .ip = ip };
 
             // Check if key exists
             const found = self.nodesLookup.get(key);
@@ -328,6 +438,12 @@ pub const StackTrie = struct {
         self.nodes.items[RootId].hitCount = 0;
 
         // Keep allocation, but clear entries
+        for (self.nodes.items[1..]) |node| {
+            switch (node.payload) {
+                .comm => |s| self.allocator.free(s),
+                else => {},
+            }
+        }
         self.nodesLookup.clearRetainingCapacity();
 
         // Keep allocation, but clear entries
@@ -357,6 +473,12 @@ pub const StackTrie = struct {
     }
 
     pub fn deinit(self: *StackTrie) void {
+        for (self.nodes.items) |node| {
+            switch (node.payload) {
+                .comm => |s| self.allocator.free(s),
+                else => {},
+            }
+        }
         for (self.umaps.items) |*umap| umap.deinit(self.allocator);
         self.umaps.deinit(self.allocator);
         self.nodes.deinit(self.allocator);

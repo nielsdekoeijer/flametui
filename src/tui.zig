@@ -765,6 +765,24 @@ pub const Interface = struct {
                     const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
                     self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
                 },
+                .comm => |payload| {
+                    const prefix = "[info] comm:    ";
+                    const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                    const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                    self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
+                },
+                .pid => |payload| {
+                    const prefix = "[info] pid:     ";
+                    const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                    const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                    self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
+                },
+                .tid => |payload| {
+                    const prefix = "[info] tid:     ";
+                    const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
+                    const s = if (payload.symbol.len > max_len) payload.symbol[0..max_len] else payload.symbol;
+                    self.infoSliceSymbol = try std.fmt.bufPrint(&self.infoBufSymbol, "{s}{s}", .{ prefix, s });
+                },
                 .root => |payload| {
                     const prefix = "[root] symbol:  ";
                     const max_len = if (self.infoBufSymbol.len > prefix.len) self.infoBufSymbol.len - prefix.len else 0;
@@ -897,7 +915,7 @@ pub const Interface = struct {
             try std.fmt.bufPrint(
                 &self.titleBuf,
                 "FlameGraph [{}/{}] (sort: {s})",
-                .{ self.symbolActive + 1, self.symbolTotal, @tagName(self.sortMode)  },
+                .{ self.symbolActive + 1, self.symbolTotal, @tagName(self.sortMode) },
             );
 
         // Draw the flamegraph box
@@ -1088,7 +1106,7 @@ pub const Interface = struct {
         // TODO: spaghetti, refactor this so that baseColor is provided as an input argument
         const baseColor = switch (entry.payload) {
             .kernel => self.colors.kernColor,
-            .user => self.colors.userColor,
+            .user, .comm, .tid, .pid => self.colors.userColor,
             .root => self.colors.rootColor,
         };
 

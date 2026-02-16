@@ -595,17 +595,23 @@ pub const SymbolTrie = struct {
                             isduped = true;
                             break :blk try tryDemangleOrDupe(self.allocator, w.name);
                         },
-                        .notfound => break :blk "notfound",
-                        .unmapped => break :blk "unmapped",
+                        .notfound => {
+                            isduped = true;
+                           break :blk try std.fmt.allocPrint(self.allocator, "notfound:0x{x}", .{e.umapip});
+                        },
+                        .unmapped => {
+                            isduped = true;
+                           break :blk try std.fmt.allocPrint(self.allocator, "unmapped:0x{x}", .{e.umapip});
+                        },
                     }
                 },
                 .pid => |e| blk: {
                     isduped = true;
-                    break :blk try std.fmt.allocPrint(self.allocator, "pid: {d}", .{e});
+                    break :blk try std.fmt.allocPrint(self.allocator, "pid:{d}", .{e});
                 },
                 .tid => |e| blk: {
                     isduped = true;
-                    break :blk try std.fmt.allocPrint(self.allocator, "tid: {d}", .{e});
+                    break :blk try std.fmt.allocPrint(self.allocator, "tid:{d}", .{e});
                 },
             };
 

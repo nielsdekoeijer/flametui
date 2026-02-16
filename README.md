@@ -58,9 +58,10 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 ## Future Roadmap / Ideas
 
 Before `0.0.3-alpha`:
-- [ ] Review files ensuring tests in place and happy: 
+- [ ] Review files ensuring tests in place and happy, and refactor the ugly code: 
     - [ ] src/sharedobject.zig 
     - [ ] src/symboltrie.zig  
+    - [ ] src/stacktrie.zig  
     - [ ] src/tui.zig  
 - [ ] Fix the navigation functionality (post sorting)
 - [ ] Lifecycle improvements, ensure memory usage more limited

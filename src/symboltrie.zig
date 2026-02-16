@@ -147,8 +147,186 @@ pub const SymbolTrie = struct {
         };
     }
 
+    /// Creates a symboltrie from a perf script, requires you to use -g!
     pub fn initPerfScript(allocator: std.mem.Allocator, reader: *std.Io.Reader) !SymbolTrie {
-        return try initCollapsed(allocator, reader);
+        // return try initCollapsed(allocator, reader);
+        var self = SymbolTrie{
+            .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024),
+            .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
+                allocator,
+                &[_]Key{},
+                &[_]NodeId{},
+            ),
+            .allocator = allocator,
+            .kmap = null,
+            .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
+        };
+        errdefer self.deinit();
+
+        // Append root node
+        // GIGA JANK we gotta find a better way
+        if (self.nodes.items.len == 0) {
+            try self.nodes.append(self.allocator, TrieNode{
+                .hitCount = 0,
+                .parent = RootId,
+                .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
+                .payload = .{ .root = .{ .symbol = try self.allocator.dupe(u8, "root") } },
+            });
+            const rootKey = Key{ .parent = RootId, .symbolHash = hashSymbol("root") };
+            try self.nodesLookup.put(self.allocator, rootKey, RootId);
+        }
+
+        const ParseState = enum {
+            seekingHeader,
+            parsingStack,
+            commitable,
+        };
+
+        // Parse the perf file. The tricky part here is that the stack is specified top down, and we require bottom up!
+        var state: ParseState = .seekingHeader;
+
+        var payload: std.ArrayListUnmanaged(UTriePayload) = .{};
+        defer payload.deinit(allocator);
+        var head: ?[]const u8 = null;
+
+        while (true) {
+            // Take line by line
+            const line = reader.takeDelimiterExclusive('\n') catch break;
+
+            switch (state) {
+                .seekingHeader => {
+                    // Newline unexpected, but we just continue
+                    if (line.len == 0) {
+                        std.log.warn("Encountered unexpected newline while parsing perf script", .{});
+                        continue;
+                    }
+
+                    // On comment, continue we don't care
+                    if (line[0] == '#') {
+                        continue;
+                    }
+
+                    // Split on whitespace
+                    var iter = std.mem.tokenizeAny(u8, line, " \t");
+                    const comm = iter.next() orelse {
+                        std.log.warn("Encountered whitespace newline while parsing perf script", .{});
+                        continue;
+                    };
+
+                    // Append
+                    head = try allocator.dupe(u8, comm);
+                    std.log.debug("Parsed head '{s}'", .{head orelse unreachable});
+                    state = .parsingStack;
+                },
+                .parsingStack => {
+                    // Newline designates termination
+                    if (line.len == 0) {
+                        state = ParseState.commitable;
+                    } else {
+
+                        // On comment, continue we don't care
+                        if (line[0] == '#') {
+                            continue;
+                        }
+
+                        var iter = std.mem.tokenizeAny(u8, line, " \t");
+
+                        // this grabs the ip
+                        _ = iter.next() orelse return error.StackParsingFailure;
+
+                        // This grabs the symbol
+                        const symbolRaw = iter.next() orelse return error.StackParsingFailure;
+                        const symbol = if (std.mem.indexOfScalar(u8, symbolRaw, '+')) |idx|
+                            symbolRaw[0..idx]
+                        else
+                            symbolRaw;
+
+                        if (symbol.len == 0) {
+                            std.log.err("Encountered zero-length symbol '{s}' ('{s}')", .{ symbol, symbolRaw });
+                            return error.StackParsingFailure;
+                        }
+
+                        // This grabs the dll
+                        const dllBracketed = iter.next() orelse return error.StackParsingFailure;
+
+                        const dll = std.mem.trim(u8, dllBracketed, "()");
+
+                        std.log.debug("Parsed user symbol '{s}' and dll '{s}'", .{ symbol, dll });
+                        try payload.append(allocator, .{
+                            .dll = try allocator.dupe(u8, dll),
+                            .symbol = try allocator.dupe(u8, symbol),
+                        });
+                    }
+                },
+                else => unreachable,
+            }
+
+            if (state == .commitable) {
+                state = .seekingHeader;
+
+                try payload.append(allocator, .{
+                    .dll = try allocator.dupe(u8, head orelse unreachable),
+                    .symbol = try allocator.dupe(u8, head orelse unreachable),
+                });
+
+                var parentId = RootId;
+                self.nodes.items[RootId].hitCount += 1;
+
+                var j = payload.items.len;
+                while (j > 0) {
+                    j -|= 1;
+
+                    const symbol = payload.items[j].symbol;
+
+                    const key = Key{
+                        .parent = parentId,
+                        .symbolHash = hashSymbol(symbol),
+                    };
+                    const found = self.nodesLookup.get(key);
+                    if (found) |symbolId| {
+                        // Hit! Add the total hitcount
+                        self.nodes.items[symbolId].hitCount += 1;
+                        parentId = symbolId;
+                    } else {
+                        try self.nodes.append(self.allocator, TrieNode{
+                            .hitCount = 1,
+                            .parent = parentId,
+                            .payload = .{
+                                .user = .{
+                                    .symbol = try tryDemangleOrDupe(self.allocator, payload.items[j].symbol),
+                                    .dll = try self.allocator.dupe(u8, payload.items[j].dll),
+                                }
+                            },
+                            .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
+                        });
+
+                        // Compute the new node id
+                        const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+                        try self.nodesLookup.put(self.allocator, key, nodeId);
+
+                        // Go to parent, and add self as child
+                        if (nodeId != parentId) {
+                            try self.nodes.items[parentId].children.append(self.allocator, nodeId);
+                        }
+
+                        // Update, new parent
+                        parentId = nodeId;
+                    }
+                }
+
+
+                allocator.free(head orelse unreachable);
+                head = null;
+
+                for (payload.items) |*p| {
+                    allocator.free(p.symbol);
+                    allocator.free(p.dll);
+                }
+                payload.clearRetainingCapacity();
+            }
+        }
+
+        return self;
     }
 
     // For loading a collapsed stacktrace file
@@ -166,6 +344,7 @@ pub const SymbolTrie = struct {
         };
         errdefer self.deinit();
 
+        // Append root node
         // GIGA JANK we gotta find a better way
         if (self.nodes.items.len == 0) {
             try self.nodes.append(self.allocator, TrieNode{
@@ -181,11 +360,13 @@ pub const SymbolTrie = struct {
         while (true) {
             // Take line by line
             const line = reader.takeDelimiterExclusive('\n') catch break;
+
             // Remove unexpected characters
             const trimmed = std.mem.trim(u8, line, "\r\t ");
             if (trimmed.len == 0) {
                 continue;
             }
+
             // Split into stack part and count part on the last space
             const lastSpace = std.mem.lastIndexOfScalar(u8, trimmed, ' ') orelse return error.CollapsedParseFailure;
             const stackPart = trimmed[0..lastSpace];
@@ -197,6 +378,7 @@ pub const SymbolTrie = struct {
             // Get all the entries — only tokenize the stack part, not the count
             var colonIter = std.mem.tokenizeAny(u8, stackPart, ";");
             var parentId = RootId;
+
             // For now, we just treat everything as though its a user
             while (colonIter.next()) |symbol| {
                 const key = Key{

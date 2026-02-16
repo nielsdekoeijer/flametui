@@ -29,12 +29,14 @@ fn logHandle(
 /// ===================================================================================================================
 /// Helper
 /// ===================================================================================================================
+/// Root or exit
 fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
     if (std.os.linux.geteuid() != 0) {
         Options.exitWithUsage(writer, exe_name, "Insufficient permissions: requires root\n", .{});
     }
 }
 
+/// Configures a profiler, just to prevent code dupe
 fn configureProfiler(profiler: anytype, general: Options.GeneralOptions, pid: ?[]i32) void {
     profiler.globals.map.enable_idle = if (general.enable_idle) 1 else 0;
 
@@ -61,7 +63,7 @@ const Options = struct {
 
     /// General options
     const GeneralOptions = struct {
-        verbose: bool = false,
+        verbose: bool = true,
         enable_idle: bool = false,
     };
 
@@ -265,6 +267,18 @@ const Options = struct {
 
         var general = GeneralOptions{};
 
+        if (std.mem.startsWith(u8, cmd_str, "-")) {
+            if (!parseGeneralOption(cmd_str, &args, &general, exe_name, writer)) {
+                exitWithUsage(writer, exe_name, "Unknown option: {s}\n", .{cmd_str});
+            }
+            while (args.next()) |arg| {
+                if (!parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    exitWithUsage(writer, exe_name, "Unknown option: {s}\n", .{arg});
+                }
+            }
+            return .{ .general = general, .command = .{ .stdin = .{} } };
+        }
+
         if (std.mem.eql(u8, cmd_str, "fixed")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .fixed = .{} }).fixed) = .{};
             while (args.next()) |arg| {
@@ -386,6 +400,7 @@ pub fn main() !void {
         }
     }
 
+    std.log.info("Running in mode '{s}'", .{@tagName(opts.command)});
     switch (opts.command) {
         .fixed => |command| {
             requireRoot(writer, "flametui");

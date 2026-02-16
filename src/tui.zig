@@ -476,44 +476,44 @@ pub const Interface = struct {
                             break :tui_loop;
                         }
 
-                        // UP (k, w, Arrow Up)
-                        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches('w', .{})) {
-                            if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.list.lock().*[self.symbolActive];
-                                defer self.symbols.list.unlock();
-
-                                id.* = navigate(symbols.nodes.items, id.*, .north);
-                            } else {
-                                self.highlightedNodeId = SymbolTrie.RootId;
-                            }
-                        }
-
-                        // DOWN (j, s, Arrow Down)
-                        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches('s', .{})) {
-                            if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.list.lock().*[self.symbolActive];
-                                defer self.symbols.list.unlock();
-                                id.* = navigate(symbols.nodes.items, id.*, .south);
-                            }
-                        }
-
-                        // RIGHT (l, d, Arrow Right)
-                        if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches('d', .{})) {
-                            if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.list.lock().*[self.symbolActive];
-                                defer self.symbols.list.unlock();
-                                id.* = navigate(symbols.nodes.items, id.*, .east);
-                            }
-                        }
-
-                        // LEFT (h, a, Arrow Left)
-                        if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{}) or key.matches('a', .{})) {
-                            if (self.highlightedNodeId) |*id| {
-                                const symbols = self.symbols.list.lock().*[self.symbolActive];
-                                defer self.symbols.list.unlock();
-                                id.* = navigate(symbols.nodes.items, id.*, .west);
-                            }
-                        }
+                        // // UP (k, w, Arrow Up)
+                        // if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches('w', .{})) {
+                        //     if (self.highlightedNodeId) |*id| {
+                        //         const symbols = self.symbols.list.lock().*[self.symbolActive];
+                        //         defer self.symbols.list.unlock();
+                        //
+                        //         id.* = navigate(symbols.nodes.items, id.*, .north);
+                        //     } else {
+                        //         self.highlightedNodeId = SymbolTrie.RootId;
+                        //     }
+                        // }
+                        //
+                        // // DOWN (j, s, Arrow Down)
+                        // if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches('s', .{})) {
+                        //     if (self.highlightedNodeId) |*id| {
+                        //         const symbols = self.symbols.list.lock().*[self.symbolActive];
+                        //         defer self.symbols.list.unlock();
+                        //         id.* = navigate(symbols.nodes.items, id.*, .south);
+                        //     }
+                        // }
+                        //
+                        // // RIGHT (l, d, Arrow Right)
+                        // if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches('d', .{})) {
+                        //     if (self.highlightedNodeId) |*id| {
+                        //         const symbols = self.symbols.list.lock().*[self.symbolActive];
+                        //         defer self.symbols.list.unlock();
+                        //         id.* = navigate(symbols.nodes.items, id.*, .east);
+                        //     }
+                        // }
+                        //
+                        // // LEFT (h, a, Arrow Left)
+                        // if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{}) or key.matches('a', .{})) {
+                        //     if (self.highlightedNodeId) |*id| {
+                        //         const symbols = self.symbols.list.lock().*[self.symbolActive];
+                        //         defer self.symbols.list.unlock();
+                        //         id.* = navigate(symbols.nodes.items, id.*, .west);
+                        //     }
+                        // }
 
                         // SEEK FORWARD: ]
                         if (key.matches(']', .{})) {

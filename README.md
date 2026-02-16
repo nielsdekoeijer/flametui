@@ -56,7 +56,7 @@ sudo perf script | ./FlameGraph/stackcollapse-perf.pl > out.collapsed
 zig-out/bin/flametui file out.collapsed
 ```
 
-***(Note: CURRENTLY BROKEN)***
+***(Note: CURRENTLY BROKEN, thus disabled)***
 Note that you can **click on the nodes** to expand the view! You can also navigate with keyboard:
 **hjkl** / **WASD** / **arrow keys** to move, **Enter** to zoom in, **Escape** to unzoom, **q** to quit.
 
@@ -64,11 +64,14 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 ## Future Roadmap / Ideas
 
-Before `0.0.2-alpha`:
+Before `0.0.3-alpha`:
 - [ ] Review files ensuring tests in place and happy: 
     - [ ] src/sharedobject.zig 
     - [ ] src/symboltrie.zig  
     - [ ] src/tui.zig  
+- [ ] Fix the navigation functionality (post sorting)
+- [ ] Lifecycle improvements, ensure memory usage more limited
+- [ ] Resolve binary names or comm (currently forgot to do this)
 
 There are several areas where this project could be improved:
 

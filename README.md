@@ -105,10 +105,16 @@ on older kernel versions. One [patch](https://github.com/torvalds/linux/commit/8
 fixes this by switching to `raw_spinlock_t`, in 6.12. Before that, a `spinlock_t` is used. Consequently 
 
 ## AI Usage Disclaimer
-Code is mostly hand-written, but AI was used heavily in researching both eBPF, how to create flamegraphs,
+Code is mostly hand-written (90% / 10% split), namely tests were generated.
+I don't really endorse this practice, but this project was coded for my own enjoyment and I enjoy the dopamine of 
+new features too much to resist the temptation :)...
+
+AI was however used heavily in researching both eBPF, how to create flamegraphs,
 and other systems programming details. Personally, I enjoy generative AI the most for doing research and learning. 
 I think this applies especially to software, as software allows for rapid hypothesis testing: even if the LLM barfs 
 some nonesense, you can easily fact check it in many cases. This is less true in other disciplines. 
 
 I also commit my AI flow. It's extremely brutalist: I have a `context.sh` script that just bangs everything in 
 an easy to copy format. Currently, the whole project fits in a context window. This makes for easy prompting.
+Gemini was found to be way better for research, and claude was found to be great for finding memory leaks when I was 
+feeling lazy.

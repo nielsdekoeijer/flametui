@@ -433,17 +433,18 @@ pub const StackTrie = struct {
 
     /// Remove all entries, but keep root node
     pub fn reset(self: *StackTrie) void {
-        // We keep the root node (index 0) alive, but reset its hit count.
-        self.nodes.shrinkRetainingCapacity(1);
-        self.nodes.items[RootId].hitCount = 0;
-
-        // Keep allocation, but clear entries
         for (self.nodes.items[1..]) |node| {
             switch (node.payload) {
                 .comm => |s| self.allocator.free(s),
                 else => {},
             }
         }
+
+        // We keep the root node (index 0) alive, but reset its hit count.
+        self.nodes.shrinkRetainingCapacity(1);
+        self.nodes.items[RootId].hitCount = 0;
+
+        // Keep allocation, but clear entries
         self.nodesLookup.clearRetainingCapacity();
 
         // Keep allocation, but clear entries

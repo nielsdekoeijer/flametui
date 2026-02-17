@@ -240,6 +240,12 @@ pub const SymbolTrieList = struct {
         };
     }
 
+    pub fn mapAtomic(self: *SymbolTrieList, stacktrie: StackTrieUnmanaged, mode: SymbolTrie.MapMode) void {
+        const symbols = (self.list.lock().*)[0];
+        defer self.list.unlock();
+        try symbols.map(stacktrie, mode);
+    }
+
     pub fn deinit(self: *SymbolTrieList, allocator: std.mem.Allocator) void {
         {
             const list = self.list.lock();
@@ -431,46 +437,40 @@ pub const RingApp = struct {
         self.app.deinit();
     }
 
-    pub fn run(self: *RingApp, rate: usize, slot_ns: u64, ring_slots: usize) !void {
+    pub fn run(self: *RingApp, rate: usize, slotNanoseconds: u64, ringSlots: usize) !void {
         // Reinitialize ring with requested size
         self.app.ring.deinit(self.app.allocator);
-        self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, ring_slots);
+        self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, ringSlots);
         self.app.context.ring = self.app.ring;
         self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
-
-        self.app.context.binDurationNanoseconds = slot_ns;
+        self.app.context.binDurationNanoseconds = slotNanoseconds;
 
         try self.app.start(rate);
-
         const merge_interval = 16 * std.time.ns_per_ms;
-
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
+
             if (self.app.ring.peekReaderTail()) |stack_trie| {
-                const symbols = (self.app.symbols.list.lock().*)[0];
-                defer self.app.symbols.list.unlock();
+                // Remove all stale stacktries from the symboltrie
+                self.app.symbols.mapAtomic(stack_trie, .evict);
 
-                try symbols.map(stack_trie.*, .evict);
+                // Reset the stacktrie so it can be reused
                 stack_trie.reset(self.app.allocator);
-
                 self.app.ring.advanceReaderTail();
 
                 shouldRedraw = true;
             }
 
             while (self.app.ring.peekReaderHead()) |stack_trie| {
-                const symbols = self.app.symbols.list.lock().*[0];
-                defer self.app.symbols.list.unlock();
-
-                try symbols.map(stack_trie.*, .merge);
-
+                // Merge in all the fresh stacktries
+                self.app.symbols.mapAtomic(stack_trie, .merge);
                 self.app.ring.advanceReaderHead();
 
                 shouldRedraw = true;
             }
 
-            if (self.app.interface.loop) |*loop| {
-                if (shouldRedraw) {
+            if (shouldRedraw) {
+                if (self.app.interface.loop) |*loop| {
                     loop.postEvent(.{ .redraw = {} });
                 }
             }
@@ -502,29 +502,25 @@ pub const AggregateApp = struct {
         self.app.context.binDurationNanoseconds = 50 * std.time.ns_per_ms;
 
         try self.app.start(rate);
-
         const merge_interval = 16 * std.time.ns_per_ms;
-
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
 
-            while (self.app.ring.peekReaderHead()) |stack_trie| {
-                const symbols = self.app.symbols.list.lock().*[0];
-                defer self.app.symbols.list.unlock();
-
-                try symbols.map(stack_trie.*, .merge);
-
-                self.app.ring.advanceReaderHead();
-                shouldRedraw = true;
-            }
-
             while (self.app.ring.peekReaderTail()) |stack_trie| {
+                // Remove all stale stacktries from the symboltrie
                 stack_trie.reset(self.app.allocator);
                 self.app.ring.advanceReaderTail();
             }
 
-            if (self.app.interface.loop) |*loop| {
-                if (shouldRedraw) {
+            while (self.app.ring.peekReaderHead()) |stack_trie| {
+                // Merge in all the fresh stacktries
+                self.app.symbols.mapAtomic(stack_trie, .merge);
+                self.app.ring.advanceReaderHead();
+                shouldRedraw = true;
+            }
+
+            if (shouldRedraw) {
+                if (self.app.interface.loop) |*loop| {
                     loop.postEvent(.{ .redraw = {} });
                 }
             }

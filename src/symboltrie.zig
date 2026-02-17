@@ -543,8 +543,10 @@ pub const SymbolTrie = struct {
         return std.hash.Wyhash.hash(0, str);
     }
 
+    pub const MapMode = enum { merge, evict };
+
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
-    pub fn map(self: *SymbolTrie, stacktrie: StackTrieUnmanaged, mode: enum { merge, evict }) !void {
+    pub fn map(self: *SymbolTrie, stacktrie: StackTrieUnmanaged, mode: MapMode) !void {
         // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie. Why
         // cant we have a 1:1 relation? In the symboltrie, we may resolve different instruction pointers to the
         // same symbol name. Idiomatically, for flamegraphs we need to merge them.

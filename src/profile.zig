@@ -52,6 +52,9 @@ pub const EventType = struct {
 
         return event;
     }
+
+    test "profile.EventType.init initializes correctly" {
+    }
 };
 
 test "profile.EventType.init parses minimal event with empty stacks" {

@@ -1,0 +1,52 @@
+name: Release Builder
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*" 
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            archive_name: flametui-x86_64-linux
+          - target: aarch64-linux-musl
+            archive_name: flametui-aarch64-linux
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version:0.15.1 
+
+      - name: Build Binary
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+
+      - name: Rename and Prepare Asset
+        run: |
+          mkdir -p release
+          mv zig-out/bin/flametui release/${{ matrix.archive_name }}
+          cp README.md release/README.md
+
+      - name: Create Tarball
+        run: |
+          cd release
+          tar -czvf ${{ matrix.archive_name }}.tar.gz ${{ matrix.archive_name }} README.md
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/${{ matrix.archive_name }}.tar.gz

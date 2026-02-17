@@ -54,7 +54,7 @@ pub const EventType = struct {
     }
 
     test "profile.EventType.init parses mixed user and kernel stacks correctly" {
-        const raw_data = [_]u64{
+        const raw = [_]u64{
             (@as(u64, 32) << 32) | 100, // [0] pid (32) | tid (100) -> (32 << 32) | 100
             123456789, // [1] timestamp -> 123456789
             16, // [2] user_stack_size_bytes -> 16 (2 * 8 bytes)
@@ -67,8 +67,7 @@ pub const EventType = struct {
         };
 
         // Cast the pointer to the type expected by init
-        const ptr = &raw_data[0];
-        const event = EventType.init(ptr);
+        const event = EventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(32, event.pid);
         try std.testing.expectEqual(100, event.tid);
@@ -89,7 +88,7 @@ pub const EventType = struct {
     test "profile.EventType.init parses minimal event with empty stacks" {
         const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
 
-        const event = EventType.init(@ptrCast(&raw));
+        const event = EventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(42, event.pid);
         try std.testing.expectEqual(0, event.uips.len);
@@ -99,7 +98,7 @@ pub const EventType = struct {
     test "profile.EventType.init parses kernel-only stacks" {
         const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
 
-        const event = EventType.init(@ptrCast(&raw));
+        const event = EventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(99, event.pid);
         try std.testing.expectEqual(0, event.uips.len);
@@ -114,9 +113,7 @@ const ProfileFunctionName = "do_sample";
 /// Wrappers
 /// ===================================================================================================================
 /// Wrapper around our profiling ebpf program
-pub const Profiler = struct {
-    allocator: std.mem.Allocator,
-
+pub const ProfilerUnmanaged = struct {
     // Owned copy of our bpf code
     bytecode: []align(8) const u8,
 
@@ -137,7 +134,7 @@ pub const Profiler = struct {
         comptime handler: *const fn (*ContextType, *const EventTypeRaw) void,
         allocator: std.mem.Allocator,
         context: *ContextType,
-    ) !Profiler {
+    ) !ProfilerUnmanaged {
         // Configure logging
         bpf.setupLoggerBackend(.zig);
 
@@ -157,8 +154,7 @@ pub const Profiler = struct {
         var globals = try object.getMapPointer("globals_map", Definitions.globals_t);
         errdefer globals.deinit();
 
-        return Profiler{
-            .allocator = allocator,
+        return ProfilerUnmanaged{
             .bytecode = code,
             .object = object,
             .links = null,
@@ -167,31 +163,31 @@ pub const Profiler = struct {
         };
     }
 
-    pub fn deinit(self: *Profiler) void {
+    pub fn deinit(self: *ProfilerUnmanaged, allocator: std.mem.Allocator) void {
         // Frees the links, servering the connection
-        self.stop();
+        self.stop(allocator);
 
         // Destroy links
         self.globals.deinit();
         self.ring.deinit();
         self.object.deinit();
 
-        self.allocator.free(self.bytecode);
+        allocator.free(self.bytecode);
     }
 
     /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
     /// the connection.
-    pub fn start(self: *Profiler, rate: usize) !void {
+    pub fn start(self: *ProfilerUnmanaged, allocator: std.mem.Allocator, rate: usize) !void {
         if (self.links) |_| {
-            return error.ProfilerStartingWhileStarted;
+            return error.ProfilerUnmanagedStartingWhileStarted;
         }
 
         const pid = -1;
 
         // Create links
         const cpuCount = try std.Thread.getCpuCount();
-        const links = try self.allocator.alloc(bpf.Object.Link, cpuCount);
-        errdefer self.allocator.free(links);
+        const links = try allocator.alloc(bpf.Object.Link, cpuCount);
+        errdefer allocator.free(links);
 
         // Open perf events
         std.log.info("Starting perf event with rate {} and pid {}", .{ rate, pid });
@@ -233,13 +229,13 @@ pub const Profiler = struct {
     }
 
     /// Stop running by detaching the link
-    pub fn stop(self: *Profiler) void {
+    pub fn stop(self: *ProfilerUnmanaged, allocator: std.mem.Allocator) void {
         if (self.links) |links| {
             for (links) |*link| {
                 link.deinit();
             }
 
-            self.allocator.free(links);
+            allocator.free(links);
             self.links = null;
         }
     }

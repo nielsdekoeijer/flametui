@@ -15,7 +15,7 @@ const StackTrie = @import("stacktrie.zig").StackTrie;
 const EventType = @import("profile.zig").EventType;
 const EventTypeRaw = @import("profile.zig").EventTypeRaw;
 const Program = @import("profile.zig").Program;
-const Profiler = @import("profile.zig").Profiler;
+const ProfilerUnmanaged = @import("profile.zig").ProfilerUnmanaged;
 const Interface = @import("tui.zig").Interface;
 const ThreadSafe = @import("lock.zig").ThreadSafe;
 
@@ -267,7 +267,7 @@ pub const RingProfilerApp = struct {
     context: *RingProfilerContext,
 
     /// eBPF profiler program
-    profiler: Profiler,
+    profiler: ProfilerUnmanaged,
 
     /// Thread for handling eBPF callbacks
     bpfThread: ?std.Thread,
@@ -299,8 +299,8 @@ pub const RingProfilerApp = struct {
         errdefer context.deinit(allocator);
 
         // init profiler
-        var profiler = try Profiler.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
-        errdefer profiler.deinit();
+        var profiler = try ProfilerUnmanaged.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
+        errdefer profiler.deinit(allocator);
 
         // init kmap
         const kmap = try allocator.create(KMap);
@@ -340,7 +340,7 @@ pub const RingProfilerApp = struct {
         self.kmap.deinit();
         self.allocator.destroy(self.kmap);
 
-        self.profiler.deinit();
+        self.profiler.deinit(self.allocator);
 
         self.context.deinit(self.allocator);
         self.allocator.destroy(self.context);
@@ -374,7 +374,7 @@ pub const RingProfilerApp = struct {
 
     /// Worker thread, draining bpf events
     fn bpfWorker(self: *RingProfilerApp, rate: usize) void {
-        self.profiler.start(rate) catch {
+        self.profiler.start(self.allocator, rate) catch {
             @panic("Could not start profiler");
         };
 
@@ -387,7 +387,7 @@ pub const RingProfilerApp = struct {
             std.Thread.sleep(5 * std.time.ns_per_ms);
         }
 
-        self.profiler.stop();
+        self.profiler.stop(self.allocator);
     }
 
     /// Manages the tui
@@ -550,8 +550,8 @@ pub const FixedApp = struct {
             self.app.ring.readerHead = 0;
             self.app.ring.readerTail = 0;
 
-            try self.app.profiler.start(rate);
-            defer self.app.profiler.stop();
+            try self.app.profiler.start(self.app.allocator, rate);
+            defer self.app.profiler.stop(self.app.allocator);
 
             var timer = try std.time.Timer.start();
 
@@ -574,8 +574,8 @@ pub const FixedApp = struct {
         } else {
             self.app.context.binDurationNanoseconds = std.math.maxInt(u64);
 
-            try self.app.profiler.start(rate);
-            defer self.app.profiler.stop();
+            try self.app.profiler.start(self.app.allocator, rate);
+            defer self.app.profiler.stop(self.app.allocator);
 
             var timer = try std.time.Timer.start();
             while (timer.read() < timeout_ns) {

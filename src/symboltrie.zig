@@ -1,6 +1,6 @@
 const std = @import("std");
-const KMap = @import("kmap.zig").KMap;
-const StackTrie = @import("stacktrie.zig").StackTrie;
+const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
+const StackTrieUnmanaged = @import("stacktrie.zig").StackTrieUnmanaged;
 const SharedObjectMapCache = @import("sharedobject.zig").SharedObjectMapCache;
 const PID = @import("profile.zig").PID;
 const TID = @import("profile.zig").TID;
@@ -133,12 +133,12 @@ pub const SymbolTrie = struct {
     allocator: std.mem.Allocator,
 
     /// Kernel maps, assumed static
-    kmap: ?*KMap,
+    kmap: ?*KMapUnmanaged,
 
     /// For loading dlls
     sharedObjectMapCache: SharedObjectMapCache,
 
-    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMap) !SymbolTrie {
+    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMapUnmanaged) !SymbolTrie {
         return SymbolTrie{
             .nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024),
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
@@ -544,22 +544,22 @@ pub const SymbolTrie = struct {
     }
 
     // Convert a stacktrie into a symboltrie. What we do is load the symbols
-    pub fn map(self: *SymbolTrie, stacks: StackTrie, mode: enum { merge, evict }) !void {
+    pub fn map(self: *SymbolTrie, stacktrie: StackTrieUnmanaged, mode: enum { merge, evict }) !void {
         // The shadowmap is used to resolve parents of the stacktrie to the correct one in the symboltrie. Why
         // cant we have a 1:1 relation? In the symboltrie, we may resolve different instruction pointers to the
         // same symbol name. Idiomatically, for flamegraphs we need to merge them.
-        const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrie.NodeId, SymbolTrie.NodeId);
-        var shadowMap = try ShadowMap.init(self.allocator, &[_]StackTrie.NodeId{}, &[_]SymbolTrie.NodeId{});
+        const ShadowMap = std.AutoArrayHashMapUnmanaged(StackTrieUnmanaged.NodeId, SymbolTrie.NodeId);
+        var shadowMap = try ShadowMap.init(self.allocator, &[_]StackTrieUnmanaged.NodeId{}, &[_]SymbolTrie.NodeId{});
         defer shadowMap.deinit(self.allocator);
 
         // Map the root ids to eachother
-        try shadowMap.put(self.allocator, StackTrie.RootId, RootId);
+        try shadowMap.put(self.allocator, StackTrieUnmanaged.RootId, RootId);
 
         // We exploit the fact that our tree is laid out from root --> upwards
-        for (0..stacks.nodes.items.len) |i| {
+        for (0..stacktrie.nodes.items.len) |i| {
             // Get stack item
             const stackId: NodeId = @intCast(i);
-            const stackItem = stacks.nodes.items[stackId];
+            const stackItem = stacktrie.nodes.items[stackId];
 
             // If no hitcount, our eviction logic does nothing
             if (mode == .evict and stackItem.hitCount == 0) {
@@ -574,21 +574,24 @@ pub const SymbolTrie = struct {
             const symbol = switch (stackItem.payload) {
                 // Root is just given
                 .root => "root",
+
                 // Comm node
                 .comm => |e| blk: {
                     isduped = true;
                     break :blk try self.allocator.dupe(u8, e);
                 },
+
                 // Use our kmap to resolve the symbol
                 // TODO: we throw, do we want to do this differently?
                 .kernel => |e| blk: {
                     const s = try self.kmap.?.find(e.kmapip);
                     break :blk s.symbol;
                 },
+
                 // Use our umap to resolve the symbol
                 // TODO: we throw, do we want to do this differently?
                 .user => |e| blk: {
-                    const p = stacks.umaps.items[e.umapid];
+                    const p = stacktrie.umaps.items[e.umapid];
                     const s = try self.sharedObjectMapCache.find(p.path);
                     switch (s.find(e.umapip, p)) {
                         .found => |w| {
@@ -605,10 +608,12 @@ pub const SymbolTrie = struct {
                         },
                     }
                 },
+
                 .pid => |e| blk: {
                     isduped = true;
                     break :blk try std.fmt.allocPrint(self.allocator, "pid:{d}", .{e});
                 },
+
                 .tid => |e| blk: {
                     isduped = true;
                     break :blk try std.fmt.allocPrint(self.allocator, "tid:{d}", .{e});
@@ -682,7 +687,7 @@ pub const SymbolTrie = struct {
                                         // take the symbol, takes ownership!
                                         .symbol = try self.allocator.dupe(u8, symbol),
                                         // clone the dll for debug later
-                                        .dll = try self.allocator.dupe(u8, stacks.umaps.items[e.umapid].path),
+                                        .dll = try self.allocator.dupe(u8, stacktrie.umaps.items[e.umapid].path),
                                     },
                                 },
                             },

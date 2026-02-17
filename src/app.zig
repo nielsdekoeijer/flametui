@@ -9,9 +9,9 @@ const PID = @import("profile.zig").PID;
 const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
-const KMap = @import("kmap.zig").KMap;
+const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
-const StackTrie = @import("stacktrie.zig").StackTrie;
+const StackTrieUnmanaged = @import("stacktrie.zig").StackTrieUnmanaged;
 const EventType = @import("profile.zig").EventType;
 const EventTypeRaw = @import("profile.zig").EventTypeRaw;
 const Program = @import("profile.zig").Program;
@@ -30,28 +30,32 @@ const RingProfilerContext = struct {
     binDurationNanoseconds: u64,
 
     /// A reference to a ringbuffer containing stacktries, not owned by us
-    ring: *StackTrieRing,
+    ring: *StackTrieUnmanagedRing,
 
     /// The currently selected iptrie from the ring
-    iptrieCurrent: *StackTrie,
+    iptrieCurrent: *StackTrieUnmanaged,
 
     /// A cache to loaded umaps, to be shared between iptries to accelerate searches
     umapCache: UMapCacheUnmanaged,
 
+    /// We manage an allocator due to the callback
+    allocator: std.mem.Allocator,
+
     /// Initialize with a reference to an existing stack trie ring
-    pub fn init(allocator: std.mem.Allocator, ring: *StackTrieRing) !RingProfilerContext {
+    pub fn init(allocator: std.mem.Allocator, ring: *StackTrieUnmanagedRing) !RingProfilerContext {
         return .{
             .ring = ring,
             .iptrieCurrent = &ring.stacktries[0],
             .umapCache = try UMapCacheUnmanaged.init(allocator),
             .binStartNanoseconds = null,
             .binDurationNanoseconds = 100 * std.time.ns_per_ms,
+            .allocator = allocator,
         };
     }
 
     /// Clear and invalidate
-    pub fn deinit(self: *RingProfilerContext, allocator: std.mem.Allocator) void {
-        self.umapCache.deinit(allocator);
+    pub fn deinit(self: *RingProfilerContext) void {
+        self.umapCache.deinit(self.allocator);
 
         // invalidate
         defer self.* = undefined;
@@ -66,7 +70,7 @@ const RingProfilerContext = struct {
 
                 if (context.ring.progressWriterHead()) |new| {
                     context.iptrieCurrent = new;
-                    context.iptrieCurrent.reset();
+                    context.iptrieCurrent.reset(context.allocator);
                 } else {
                     break;
                 }
@@ -77,7 +81,7 @@ const RingProfilerContext = struct {
         }
 
         // Cannot throw, so panic on error
-        context.iptrieCurrent.add(parsed, &context.umapCache) catch {
+        context.iptrieCurrent.add(context.allocator, parsed, &context.umapCache) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -87,9 +91,9 @@ const RingProfilerContext = struct {
 /// StackRingBuffer
 /// ===================================================================================================================
 /// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand.
-pub const StackTrieRing = struct {
+pub const StackTrieUnmanagedRing = struct {
     allocator: std.mem.Allocator,
-    stacktries: []StackTrie,
+    stacktries: []StackTrieUnmanaged,
     mutex: std.Thread.Mutex,
 
     // Currently written by ebpf program
@@ -101,17 +105,17 @@ pub const StackTrieRing = struct {
     // Oldest sample, writerHead + 1, should be evicted from symboltrie
     readerTail: usize,
 
-    /// Initialize the ring with an empty StackTrie list
-    pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieRing {
-        const stacktries = try allocator.alloc(StackTrie, n);
+    /// Initialize the ring with an empty StackTrieUnmanaged list
+    pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieUnmanagedRing {
+        const stacktries = try allocator.alloc(StackTrieUnmanaged, n);
         errdefer allocator.free(stacktries);
 
         for (stacktries, 0..) |*stacktrie, i| {
-            errdefer for (0..i) |j| stacktries[j].deinit();
-            stacktrie.* = try StackTrie.init(allocator);
+            errdefer for (0..i) |j| stacktries[j].deinit(allocator);
+            stacktrie.* = try StackTrieUnmanaged.init(allocator);
         }
 
-        return StackTrieRing{
+        return StackTrieUnmanagedRing{
             .allocator = allocator,
             .stacktries = stacktries,
             .mutex = .{},
@@ -122,11 +126,11 @@ pub const StackTrieRing = struct {
     }
 
     /// Atomic deinit + invalidate
-    pub fn deinit(self: *StackTrieRing, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *StackTrieUnmanagedRing, allocator: std.mem.Allocator) void {
         self.mutex.lock();
 
         for (self.stacktries) |*stacktrie| {
-            stacktrie.deinit();
+            stacktrie.deinit(allocator);
         }
 
         allocator.free(self.stacktries);
@@ -137,7 +141,7 @@ pub const StackTrieRing = struct {
 
     // Returns the next head, or null if it would exceed the readerTail. If null, the eBPF program simply keeps
     // writing to the same "bucket", i.e. stacktrace.
-    pub fn progressWriterHead(self: *StackTrieRing) ?*StackTrie {
+    pub fn progressWriterHead(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -154,7 +158,7 @@ pub const StackTrieRing = struct {
 
     // Returns the next reader head, aka the newest stacktrie. Nominally, this should be 1 behind the writer head.
     // Merges to the symboltrie until null, in which case do nothing.
-    pub fn peekReaderHead(self: *StackTrieRing) ?*StackTrie {
+    pub fn peekReaderHead(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -169,7 +173,7 @@ pub const StackTrieRing = struct {
     }
 
     // Pushes reader head one forward
-    pub fn advanceReaderHead(self: *StackTrieRing) void {
+    pub fn advanceReaderHead(self: *StackTrieUnmanagedRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -178,7 +182,7 @@ pub const StackTrieRing = struct {
     }
 
     // Returns the next tail,
-    pub fn peekReaderTail(self: *StackTrieRing) ?*StackTrie {
+    pub fn peekReaderTail(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -191,7 +195,7 @@ pub const StackTrieRing = struct {
     }
 
     // Pushes reader tail one forward
-    pub fn advanceReaderTail(self: *StackTrieRing) void {
+    pub fn advanceReaderTail(self: *StackTrieUnmanagedRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -205,9 +209,9 @@ pub const StackTrieRing = struct {
 /// ===================================================================================================================
 pub const SymbolTrieList = struct {
     list: ThreadSafe([]*SymbolTrie),
-    kmap: ?*KMap,
+    kmap: ?*KMapUnmanaged,
 
-    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMap, size: usize) !SymbolTrieList {
+    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMapUnmanaged, size: usize) !SymbolTrieList {
         const symboltrieSlice = try allocator.alloc(*SymbolTrie, size);
         errdefer allocator.free(symboltrieSlice);
 
@@ -261,7 +265,7 @@ pub const RingProfiler = struct {
     allocator: std.mem.Allocator,
 
     /// Ringbuffer that contains stack tries
-    ring: *StackTrieRing,
+    ring: *StackTrieUnmanagedRing,
 
     /// Context for running our profiler
     context: *RingProfilerContext,
@@ -276,7 +280,10 @@ pub const RingProfiler = struct {
     tuiThread: ?std.Thread,
 
     /// KMap for symboltries
-    kmap: *KMap,
+    kmap: *KMapUnmanaged,
+
+    /// KMap allocator, using an arena allocator means way faster deinit and init
+    kmapArena: std.heap.ArenaAllocator,
 
     /// SymbolTries we make available for drawing
     symbols: *SymbolTrieList,
@@ -289,23 +296,27 @@ pub const RingProfiler = struct {
 
     pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfiler {
         // init ringbuffer pointer
-        const ring = try allocator.create(StackTrieRing);
-        ring.* = try StackTrieRing.init(allocator, 16);
+        const ring = try allocator.create(StackTrieUnmanagedRing);
+        ring.* = try StackTrieUnmanagedRing.init(allocator, 16);
         errdefer ring.deinit(allocator);
 
         // init profiler context pointer
         const context = try allocator.create(RingProfilerContext);
         context.* = try RingProfilerContext.init(allocator, ring);
-        errdefer context.deinit(allocator);
+        errdefer context.deinit();
 
         // init profiler
         var profiler = try ProfilerUnmanaged.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
         errdefer profiler.deinit(allocator);
 
+        // init kmapArena
+        var kmapArena = std.heap.ArenaAllocator.init(allocator);
+        errdefer kmapArena.deinit();
+
         // init kmap
-        const kmap = try allocator.create(KMap);
-        kmap.* = try KMap.init(allocator);
-        errdefer kmap.deinit();
+        const kmap = try allocator.create(KMapUnmanaged);
+        kmap.* = try KMapUnmanaged.init(kmapArena.allocator());
+        errdefer kmap.deinit(kmapArena.allocator());
 
         // init symbol list
         const symbols = try allocator.create(SymbolTrieList);
@@ -323,6 +334,7 @@ pub const RingProfiler = struct {
             .context = context,
             .profiler = profiler,
             .kmap = kmap,
+            .kmapArena = kmapArena,
             .symbols = symbols,
             .interface = interface,
             .bpfThread = null,
@@ -337,12 +349,14 @@ pub const RingProfiler = struct {
         self.symbols.deinit(self.allocator);
         self.allocator.destroy(self.symbols);
 
-        self.kmap.deinit();
+        self.kmap.deinit(self.kmapArena.allocator());
         self.allocator.destroy(self.kmap);
+
+        self.kmapArena.deinit();
 
         self.profiler.deinit(self.allocator);
 
-        self.context.deinit(self.allocator);
+        self.context.deinit();
         self.allocator.destroy(self.context);
 
         self.ring.deinit(self.allocator);
@@ -420,7 +434,7 @@ pub const RingApp = struct {
     pub fn run(self: *RingApp, rate: usize, slot_ns: u64, ring_slots: usize) !void {
         // Reinitialize ring with requested size
         self.app.ring.deinit(self.app.allocator);
-        self.app.ring.* = try StackTrieRing.init(self.app.allocator, ring_slots);
+        self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, ring_slots);
         self.app.context.ring = self.app.ring;
         self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
 
@@ -437,7 +451,7 @@ pub const RingApp = struct {
                 defer self.app.symbols.list.unlock();
 
                 try symbols.map(stack_trie.*, .evict);
-                stack_trie.reset();
+                stack_trie.reset(self.app.allocator);
 
                 self.app.ring.advanceReaderTail();
 
@@ -505,7 +519,7 @@ pub const AggregateApp = struct {
             }
 
             while (self.app.ring.peekReaderTail()) |stack_trie| {
-                stack_trie.reset();
+                stack_trie.reset(self.app.allocator);
                 self.app.ring.advanceReaderTail();
             }
 
@@ -548,7 +562,7 @@ pub const FixedApp = struct {
             const bin_ns = timeout_ns / binCount;
 
             self.app.ring.deinit(self.app.allocator);
-            self.app.ring.* = try StackTrieRing.init(self.app.allocator, binCount);
+            self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, binCount);
             self.app.context.ring = self.app.ring;
             self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
             self.app.context.binDurationNanoseconds = bin_ns;
@@ -576,7 +590,7 @@ pub const FixedApp = struct {
             for (0..binCount) |i| {
                 const symbols = self.app.symbols.list.lock();
                 defer self.app.symbols.list.unlock();
-                if (self.app.ring.stacktries[i].nodes.items[StackTrie.RootId].hitCount > 0) {
+                if (self.app.ring.stacktries[i].nodes.items[StackTrieUnmanaged.RootId].hitCount > 0) {
                     try (symbols.*)[i].map(self.app.ring.stacktries[i], .merge);
                 }
             }

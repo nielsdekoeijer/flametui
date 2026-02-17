@@ -257,7 +257,7 @@ pub const SymbolTrieList = struct {
 /// ===================================================================================================================
 /// App
 /// ===================================================================================================================
-pub const RingProfilerApp = struct {
+pub const RingProfiler = struct {
     allocator: std.mem.Allocator,
 
     /// Ringbuffer that contains stack tries
@@ -281,13 +281,13 @@ pub const RingProfilerApp = struct {
     /// SymbolTries we make available for drawing
     symbols: *SymbolTrieList,
 
-    /// Should stop our TUI
+    /// Should stop our threads
     shouldQuit: std.atomic.Value(bool),
 
     /// Our TUI
     interface: Interface,
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfilerApp {
+    pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfiler {
         // init ringbuffer pointer
         const ring = try allocator.create(StackTrieRing);
         ring.* = try StackTrieRing.init(allocator, 16);
@@ -317,7 +317,7 @@ pub const RingProfilerApp = struct {
         interface.missed = &profiler.globals.map.dropped_events;
         errdefer interface.deinit();
 
-        return RingProfilerApp{
+        return RingProfiler{
             .allocator = allocator,
             .ring = ring,
             .context = context,
@@ -331,7 +331,7 @@ pub const RingProfilerApp = struct {
         };
     }
 
-    pub fn deinit(self: *RingProfilerApp) void {
+    pub fn deinit(self: *RingProfiler) void {
         self.stop();
 
         self.symbols.deinit(self.allocator);
@@ -350,7 +350,7 @@ pub const RingProfilerApp = struct {
     }
 
     /// Start running the application
-    fn start(self: *RingProfilerApp, rate: usize) !void {
+    fn start(self: *RingProfiler, rate: usize) !void {
         self.shouldQuit.store(false, .release);
         errdefer self.stop();
 
@@ -362,7 +362,7 @@ pub const RingProfilerApp = struct {
     }
 
     /// Stop the application from running by joining threads
-    fn stop(self: *RingProfilerApp) void {
+    fn stop(self: *RingProfiler) void {
         self.shouldQuit.store(true, .release);
 
         if (self.bpfThread) |t| t.join();
@@ -373,7 +373,7 @@ pub const RingProfilerApp = struct {
     }
 
     /// Worker thread, draining bpf events
-    fn bpfWorker(self: *RingProfilerApp, rate: usize) void {
+    fn bpfWorker(self: *RingProfiler, rate: usize) void {
         self.profiler.start(self.allocator, rate) catch {
             @panic("Could not start profiler");
         };
@@ -391,7 +391,7 @@ pub const RingProfilerApp = struct {
     }
 
     /// Manages the tui
-    fn tuiWorker(self: *RingProfilerApp) void {
+    fn tuiWorker(self: *RingProfiler) void {
         self.interface.start() catch {
             @panic("Could not start TUI");
         };
@@ -402,11 +402,11 @@ pub const RingProfilerApp = struct {
 
 /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
 pub const RingApp = struct {
-    app: RingProfilerApp,
+    app: RingProfiler,
 
     pub fn init(allocator: std.mem.Allocator) !RingApp {
         return .{
-            .app = try RingProfilerApp.init(allocator, 1),
+            .app = try RingProfiler.init(allocator, 1),
         };
     }
 
@@ -465,11 +465,11 @@ pub const RingApp = struct {
 
 /// Aggregate indefinitely. Streams results to TUI, never evicts.
 pub const AggregateApp = struct {
-    app: RingProfilerApp,
+    app: RingProfiler,
 
     pub fn init(allocator: std.mem.Allocator) !AggregateApp {
         return .{
-            .app = try RingProfilerApp.init(allocator, 1),
+            .app = try RingProfiler.init(allocator, 1),
         };
     }
 
@@ -516,11 +516,11 @@ pub const AggregateApp = struct {
 
 /// Fixed duration measurement. Profile, then display the result. No streaming.
 pub const FixedApp = struct {
-    app: RingProfilerApp,
+    app: RingProfiler,
 
     pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedApp {
         return .{
-            .app = try RingProfilerApp.init(allocator, bins),
+            .app = try RingProfiler.init(allocator, bins),
         };
     }
 

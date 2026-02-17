@@ -223,7 +223,7 @@ pub const SymbolTrieList = struct {
             errdefer allocator.destroy(symboltrieSlice[i]);
 
             symboltrieSlice[i].* = try SymbolTrie.init(allocator, kmap);
-            errdefer symboltrieSlice[i].deinit();
+            errdefer symboltrieSlice[i].*.deinit();
         }
 
         const list = try allocator.create([]*SymbolTrie);
@@ -400,6 +400,9 @@ pub const RingProfiler = struct {
     }
 };
 
+/// ===================================================================================================================
+/// Ring (--ring)
+/// ===================================================================================================================
 /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
 pub const RingApp = struct {
     app: RingProfiler,
@@ -463,6 +466,9 @@ pub const RingApp = struct {
     }
 };
 
+/// ===================================================================================================================
+/// Aggregate (--aggregate)
+/// ===================================================================================================================
 /// Aggregate indefinitely. Streams results to TUI, never evicts.
 pub const AggregateApp = struct {
     app: RingProfiler,
@@ -514,6 +520,9 @@ pub const AggregateApp = struct {
     }
 };
 
+/// ===================================================================================================================
+/// Fixed (--fixed)
+/// ===================================================================================================================
 /// Fixed duration measurement. Profile, then display the result. No streaming.
 pub const FixedApp = struct {
     app: RingProfiler,
@@ -596,11 +605,16 @@ pub const FixedApp = struct {
     }
 };
 
+/// ===================================================================================================================
+/// File (--file)
+/// ===================================================================================================================
 /// From a collapsed file
 pub const FileApp = struct {
     pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) !void {
         const symbols = try allocator.create(SymbolTrieList);
         defer allocator.destroy(symbols);
+
+        // Create a symboltrie with 1 slot and no kmap (no kernel symbols need be resolved)
         symbols.* = try SymbolTrieList.init(allocator, null, 1);
         defer symbols.deinit(allocator);
 
@@ -615,6 +629,9 @@ pub const FileApp = struct {
     }
 };
 
+/// ===================================================================================================================
+/// Stdin (-)
+/// ===================================================================================================================
 /// From a perf script
 pub const StdinApp = struct {
     pub fn run(allocator: std.mem.Allocator, reader: *std.Io.Reader) !void {

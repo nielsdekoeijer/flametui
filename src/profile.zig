@@ -53,46 +53,59 @@ pub const EventType = struct {
         return event;
     }
 
-    test "profile.EventType.init initializes correctly" {
+    test "profile.EventType.init parses mixed user and kernel stacks correctly" {
+        const raw_data = [_]u64{
+            (@as(u64, 32) << 32) | 100, // [0] pid (32) | tid (100) -> (32 << 32) | 100
+            123456789, // [1] timestamp -> 123456789
+            16, // [2] user_stack_size_bytes -> 16 (2 * 8 bytes)
+            24, // [3] kernel_stack_size_bytes -> 24 (3 * 8 bytes)
+            0xAAAA, // [4] uip[0] -> 0xAAAA
+            0xBBBB, // [5] uip[1] -> 0xBBBB
+            0x1111, // [6] kip[0] -> 0x1111
+            0x2222, // [7] kip[1] -> 0x2222
+            0x3333, // [8] kip[2] -> 0x3333
+        };
+
+        // Cast the pointer to the type expected by init
+        const ptr = &raw_data[0];
+        const event = EventType.init(ptr);
+
+        try std.testing.expectEqual(32, event.pid);
+        try std.testing.expectEqual(100, event.tid);
+        try std.testing.expectEqual(123456789, event.timestamp);
+
+        // Verify User Stack
+        try std.testing.expectEqual(2, event.uips.len);
+        try std.testing.expectEqual(0xAAAA, event.uips[0]);
+        try std.testing.expectEqual(0xBBBB, event.uips[1]);
+
+        // Verify Kernel Stack
+        try std.testing.expectEqual(3, event.kips.len);
+        try std.testing.expectEqual(0x1111, event.kips[0]);
+        try std.testing.expectEqual(0x2222, event.kips[1]);
+        try std.testing.expectEqual(0x3333, event.kips[2]);
+    }
+
+    test "profile.EventType.init parses minimal event with empty stacks" {
+        const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
+
+        const event = EventType.init(@ptrCast(&raw));
+
+        try std.testing.expectEqual(42, event.pid);
+        try std.testing.expectEqual(0, event.uips.len);
+        try std.testing.expectEqual(0, event.kips.len);
+    }
+
+    test "profile.EventType.init parses kernel-only stacks" {
+        const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
+
+        const event = EventType.init(@ptrCast(&raw));
+
+        try std.testing.expectEqual(99, event.pid);
+        try std.testing.expectEqual(0, event.uips.len);
+        try std.testing.expectEqual(2, event.kips.len);
     }
 };
-
-test "profile.EventType.init parses minimal event with empty stacks" {
-    const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
-    const event = EventType.init(@ptrCast(&raw));
-    try std.testing.expectEqual(42, event.pid);
-    try std.testing.expectEqual(0, event.uips.len);
-    try std.testing.expectEqual(0, event.kips.len);
-}
-
-test "profile.EventType.init parses event with user and kernel IPs" {
-    const raw = [_]u64{
-        @as(u64, 1234) << 32 | 5678, // tgid: pid=1234, tid=5678
-        99999, // timestamp
-        16, // user_stack_bytes = 2 IPs * 8
-        8, // kernel_stack_bytes = 1 IP * 8
-        0xAABB, // uip[0]
-        0xCCDD, // uip[1]
-        0xEEFF, // kip[0]
-    };
-    const event = EventType.init(@ptrCast(&raw));
-    try std.testing.expectEqual(1234, event.pid);
-    try std.testing.expectEqual(5678, event.tid);
-    try std.testing.expectEqual(99999, event.timestamp);
-    try std.testing.expectEqual(2, event.uips.len);
-    try std.testing.expectEqual(0xAABB, event.uips[0]);
-    try std.testing.expectEqual(0xCCDD, event.uips[1]);
-    try std.testing.expectEqual(1, event.kips.len);
-    try std.testing.expectEqual(0xEEFF, event.kips[0]);
-}
-
-test "profile.EventType.init parses kernel-only stacks" {
-    const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
-    const event = EventType.init(@ptrCast(&raw));
-    try std.testing.expectEqual(99, event.pid);
-    try std.testing.expectEqual(0, event.uips.len);
-    try std.testing.expectEqual(2, event.kips.len);
-}
 
 /// Name of the function in our bpf program
 const ProfileFunctionName = "do_sample";

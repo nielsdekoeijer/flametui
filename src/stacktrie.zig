@@ -4,8 +4,8 @@ const PID = @import("profile.zig").PID;
 const TID = @import("profile.zig").TID;
 const InstructionPointer = @import("profile.zig").InstructionPointer;
 
-const UMapEntry = @import("umap.zig").UMapEntry;
-const UMapCache = @import("umap.zig").UMapCache;
+const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
+const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
 
 const EventType = @import("profile.zig").EventType;
@@ -87,9 +87,9 @@ pub const StackTrie = struct {
     pub const Key = struct { pid: PID, tid: TID, parent: NodeId, ip: InstructionPointer, kind: TrieKind };
 
     /// Contains the entries of the umaps that are in the trie. This is indexed by the UmapId. After resolving a
-    /// UMapEntry from the UMapCache, we place a copy in this umaps, owning a copy of it. This is critical because
-    /// our UMapCache may choose to unload a umap for a given pid if it dies.
-    umaps: std.ArrayListUnmanaged(UMapEntry),
+    /// UMapEntryUnmanaged from the UMapCacheUnmanaged, we place a copy in this umaps, owning a copy of it. This is critical because
+    /// our UMapCacheUnmanaged may choose to unload a umap for a given pid if it dies.
+    umaps: std.ArrayListUnmanaged(UMapEntryUnmanaged),
 
     /// The underlying trie of nodes stored as a flat array. The root node is always the first entry.
     nodes: std.ArrayListUnmanaged(TrieNode),
@@ -113,7 +113,7 @@ pub const StackTrie = struct {
         });
 
         return StackTrie{
-            .umaps = try std.ArrayListUnmanaged(UMapEntry).initCapacity(allocator, 1024),
+            .umaps = try std.ArrayListUnmanaged(UMapEntryUnmanaged).initCapacity(allocator, 1024),
             .nodes = nodes,
             .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
                 allocator,
@@ -134,12 +134,12 @@ pub const StackTrie = struct {
     }
 
     /// Adds an event to the trie
-    pub fn add(self: *StackTrie, event: EventType, umapCache: *UMapCache) !void {
+    pub fn add(self: *StackTrie, event: EventType, umapCache: *UMapCacheUnmanaged) !void {
         const pid = @as(PID, @intCast(event.pid));
         const tid = @as(TID, @intCast(event.tid));
 
         // Obtain the umap
-        const umap = try umapCache.find(pid);
+        const umap = try umapCache.find(self.allocator, pid);
         const comm = switch (umap.*) {
             .loaded => |u| u.name,
             .zombie => "nocomm",
@@ -266,12 +266,12 @@ pub const StackTrie = struct {
                 // Update parent to self for next node
                 parent = @intCast(index);
             } else {
-                // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntry
-                var item: UMapEntry = switch (umap.*) {
+                // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntryUnmanaged
+                var item: UMapEntryUnmanaged = switch (umap.*) {
                     .loaded => |entry| if (try entry.findAndDupe(self.allocator, ip)) |e|
                         e
                     else
-                        UMapEntry{
+                        UMapEntryUnmanaged{
                             .path = try self.allocator.dupe(u8, "not found"),
                             .offset = 0,
                             .addressBeg = 0,
@@ -279,7 +279,7 @@ pub const StackTrie = struct {
                         },
 
                     // TODO: we flatten our typesystem here, can be improved
-                    .zombie => UMapEntry{
+                    .zombie => UMapEntryUnmanaged{
                         .path = try self.allocator.dupe(u8, "zombie"),
                         .offset = 0,
                         .addressBeg = 0,
@@ -365,8 +365,8 @@ pub const StackTrie = struct {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
-        var cache = try UMapCache.init(std.testing.allocator);
-        defer cache.deinit();
+        var cache = try UMapCacheUnmanaged.init(std.testing.allocator);
+        defer cache.deinit(std.testing.allocator);
 
         const event = EventType{
             .pid = 1,
@@ -395,8 +395,8 @@ pub const StackTrie = struct {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
-        var cache = try UMapCache.init(std.testing.allocator);
-        defer cache.deinit();
+        var cache = try UMapCacheUnmanaged.init(std.testing.allocator);
+        defer cache.deinit(std.testing.allocator);
 
         const event = EventType{
             .pid = 1,
@@ -419,8 +419,8 @@ pub const StackTrie = struct {
         var trie = try StackTrie.init(std.testing.allocator);
         defer trie.deinit();
 
-        var cache = try UMapCache.init(std.testing.allocator);
-        defer cache.deinit();
+        var cache = try UMapCacheUnmanaged.init(std.testing.allocator);
+        defer cache.deinit(std.testing.allocator);
 
         for ([_]u64{ 1, 2 }) |pid| {
             try trie.add(.{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} }, &cache);

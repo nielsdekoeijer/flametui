@@ -1,5 +1,5 @@
 const std = @import("std");
-const UMapEntry = @import("umap.zig").UMapEntry;
+const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 
 /// Our hashing function
 /// TODO: use the StringHashMap instead?
@@ -119,7 +119,7 @@ pub const SharedObjectMap = struct {
     };
 
     /// Find an entry given an instruction pointer, or null if this instance wasn't mapped
-    pub fn find(self: SharedObjectMap, ipRaw: u64, uentry: UMapEntry) SharedObjectSymbolResult {
+    pub fn find(self: SharedObjectMap, ipRaw: u64, uentry: UMapEntryUnmanaged) SharedObjectSymbolResult {
         switch (self.internal) {
             .loaded => |s| {
                 // The IP we should use depends on what we get here

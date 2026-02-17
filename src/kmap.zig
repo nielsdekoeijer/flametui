@@ -5,20 +5,26 @@ const InstructionPointer = @import("profile.zig").InstructionPointer;
 /// KMap
 /// ===================================================================================================================
 /// Kernel map entry, essentially a model of one line in /proc/kallsyms
-pub const KMapEntry = struct {
+pub const KMapEntryUnmanaged = struct {
     /// Symbol corresponding to the kernel map
     symbol: []const u8,
 
     /// Instruction pointer corresponding to said symbol
     ip: InstructionPointer,
+
+    pub fn deinit(self: *KMapEntryUnmanaged, allocator: std.mem.Allocator) void {
+        allocator.free(self.symbol);
+
+        self.* = undefined;
+    }
 };
 
 /// Model of the symbols in /proc/kallsyms
 pub const KMap = struct {
     /// Kernel map, a model of /proc/kallsyms
-    backend: std.ArrayListUnmanaged(KMapEntry),
+    backend: std.ArrayListUnmanaged(KMapEntryUnmanaged),
 
-    /// KMapEntry allocate a bunch of symbols. This turns out to be very inefficient. With this arena, we can manage
+    /// KMapEntryUnmanaged allocate a bunch of symbols. This turns out to be very inefficient. With this arena, we can manage
     /// 1 alloc and one dealloc rather than 100k+ seperate ones
     arena: std.heap.ArenaAllocator,
 
@@ -30,7 +36,7 @@ pub const KMap = struct {
         const underlying = arena.allocator();
 
         // Allocate backend, with a huge size
-        var backend = try std.ArrayListUnmanaged(KMapEntry).initCapacity(underlying, 256_000);
+        var backend = try std.ArrayListUnmanaged(KMapEntryUnmanaged).initCapacity(underlying, 256_000);
 
         // Relates kernel symbols and addresses
         const file = try std.fs.openFileAbsolute("/proc/kallsyms", .{});
@@ -63,10 +69,10 @@ pub const KMap = struct {
     }
 
     /// Find an entry given an instruction pointer
-    pub fn find(self: KMap, ip: InstructionPointer) error{KMapEntryLookupFailure}!KMapEntry {
+    pub fn find(self: KMap, ip: InstructionPointer) error{KMapEntryUnmanagedLookupFailure}!KMapEntryUnmanaged {
         // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
-        const index = std.sort.upperBound(KMapEntry, self.backend.items, ip, struct {
-            fn lessThan(lhs_ip: u64, rhs_map: KMapEntry) std.math.Order {
+        const index = std.sort.upperBound(KMapEntryUnmanaged, self.backend.items, ip, struct {
+            fn lessThan(lhs_ip: u64, rhs_map: KMapEntryUnmanaged) std.math.Order {
                 if (lhs_ip < rhs_map.ip) return .lt;
                 if (lhs_ip > rhs_map.ip) return .gt;
                 return .eq;
@@ -76,7 +82,7 @@ pub const KMap = struct {
         // Sort invalid
         if (index == 0) {
             std.log.warn("Failed to lookup KMap with ip: {}", .{ip});
-            return error.KMapEntryLookupFailure;
+            return error.KMapEntryUnmanagedLookupFailure;
         }
 
         // We find the upper bound, so one symbol beyond the one we want.
@@ -88,7 +94,7 @@ pub const KMap = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
-        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
         try backend.appendSlice(aa, &.{
             .{ .ip = 100, .symbol = "a" },
             .{ .ip = 200, .symbol = "b" },
@@ -97,7 +103,7 @@ pub const KMap = struct {
         const kmap = KMap{ .backend = backend, .arena = arena };
         try std.testing.expectEqualStrings("b", (try kmap.find(250)).symbol);
         try std.testing.expectEqualStrings("c", (try kmap.find(350)).symbol);
-        try std.testing.expectError(error.KMapEntryLookupFailure, kmap.find(50));
+        try std.testing.expectError(error.KMapEntryUnmanagedLookupFailure, kmap.find(50));
     }
 
     // Helper function that populates the map
@@ -109,7 +115,7 @@ pub const KMap = struct {
     // <-- 16 chars -->   <-- from index 19 onwards                      -->
     // ```
     //
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntry), content: []const u8) error{OutOfMemory}!void {
+    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntryUnmanaged), content: []const u8) error{OutOfMemory}!void {
         var lines = std.mem.tokenizeScalar(u8, content, '\n');
 
         // Loop through file contents
@@ -127,7 +133,7 @@ pub const KMap = struct {
             const symbolString = iter.next() orelse continue;
 
             // Append to our representation
-            try backend.append(allocator, KMapEntry{
+            try backend.append(allocator, KMapEntryUnmanaged{
                 .ip = address,
                 .symbol = try allocator.dupe(u8, symbolString),
             });
@@ -138,7 +144,7 @@ pub const KMap = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
-        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
         try KMap.populate(aa, &backend, "ffffffff81000000 T _stext\nffffffff81000010 t helper\n");
         try std.testing.expectEqual(backend.items.len, 2);
         try std.testing.expectEqual(backend.items[0].ip, 0xffffffff81000000);
@@ -149,13 +155,13 @@ pub const KMap = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
-        var backend = std.ArrayListUnmanaged(KMapEntry){};
+        var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
         try KMap.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n");
         try std.testing.expectEqual(backend.items.len, 0);
     }
 
     /// Check if map is sorted, usually it is
-    fn isSorted(items: []const KMapEntry) bool {
+    fn isSorted(items: []const KMapEntryUnmanaged) bool {
         for (items[1..], 0..) |entry, i| {
             if (entry.ip < items[i].ip) return false;
         }
@@ -163,7 +169,7 @@ pub const KMap = struct {
     }
 
     test "isSorted detects unsorted input" {
-        const items = [_]KMapEntry{
+        const items = [_]KMapEntryUnmanaged{
             .{ .ip = 200, .symbol = "b" },
             .{ .ip = 100, .symbol = "a" },
         };
@@ -171,10 +177,10 @@ pub const KMap = struct {
     }
 
     /// Sorts the map in ascending order for easy binary search
-    fn sort(backend: *std.ArrayListUnmanaged(KMapEntry)) void {
+    fn sort(backend: *std.ArrayListUnmanaged(KMapEntryUnmanaged)) void {
         // Sort the map so it is easier to search at a later stage
-        std.sort.block(KMapEntry, backend.items, {}, struct {
-            fn lessThan(_: void, a: KMapEntry, b: KMapEntry) bool {
+        std.sort.block(KMapEntryUnmanaged, backend.items, {}, struct {
+            fn lessThan(_: void, a: KMapEntryUnmanaged, b: KMapEntryUnmanaged) bool {
                 return a.ip < b.ip;
             }
         }.lessThan);

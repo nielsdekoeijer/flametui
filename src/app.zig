@@ -6,8 +6,8 @@ const bpf = @import("bpf.zig");
 
 const InstructionPointer = @import("profile.zig").InstructionPointer;
 const PID = @import("profile.zig").PID;
-const UMapEntry = @import("umap.zig").UMapEntry;
-const UMapCache = @import("umap.zig").UMapCache;
+const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
+const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
 const KMap = @import("kmap.zig").KMap;
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
@@ -23,24 +23,35 @@ const ThreadSafe = @import("lock.zig").ThreadSafe;
 /// Callback Contexts
 /// ===================================================================================================================
 const RingProfilerContext = struct {
+    /// The starting timestamp of the current bin in nanoseconds
     binStartNanoseconds: ?u64,
+
+    /// The duration of a bin in nanoseconds
     binDurationNanoseconds: u64,
-    iptrie: *StackTrie,
-    umapCache: UMapCache,
+
+    /// A reference to a ringbuffer containing stacktries, not owned by us
     ring: *StackTrieRing,
 
+    /// The currently selected iptrie from the ring
+    iptrieCurrent: *StackTrie,
+
+    /// A cache to loaded umaps, to be shared between iptries to accelerate searches
+    umapCache: UMapCacheUnmanaged,
+
+    /// Initialize with a reference to an existing stack trie ring
     pub fn init(allocator: std.mem.Allocator, ring: *StackTrieRing) !RingProfilerContext {
         return .{
             .ring = ring,
-            .iptrie = &ring.stacktries[0],
-            .umapCache = try UMapCache.init(allocator),
+            .iptrieCurrent = &ring.stacktries[0],
+            .umapCache = try UMapCacheUnmanaged.init(allocator),
             .binStartNanoseconds = null,
             .binDurationNanoseconds = 100 * std.time.ns_per_ms,
         };
     }
 
-    pub fn deinit(self: *RingProfilerContext) void {
-        self.umapCache.deinit();
+    /// Clear and invalidate
+    pub fn deinit(self: *RingProfilerContext, allocator: std.mem.Allocator) void {
+        self.umapCache.deinit(allocator);
 
         // invalidate
         defer self.* = undefined;
@@ -54,8 +65,8 @@ const RingProfilerContext = struct {
                 binStartNanoseconds.* += context.binDurationNanoseconds;
 
                 if (context.ring.progressWriterHead()) |new| {
-                    context.iptrie = new;
-                    context.iptrie.reset();
+                    context.iptrieCurrent = new;
+                    context.iptrieCurrent.reset();
                 } else {
                     break;
                 }
@@ -66,7 +77,7 @@ const RingProfilerContext = struct {
         }
 
         // Cannot throw, so panic on error
-        context.iptrie.add(parsed, &context.umapCache) catch {
+        context.iptrieCurrent.add(parsed, &context.umapCache) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -285,7 +296,7 @@ pub const RingProfilerApp = struct {
         // init profiler context pointer
         const context = try allocator.create(RingProfilerContext);
         context.* = try RingProfilerContext.init(allocator, ring);
-        errdefer context.deinit();
+        errdefer context.deinit(allocator);
 
         // init profiler
         var profiler = try Profiler.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
@@ -331,7 +342,7 @@ pub const RingProfilerApp = struct {
 
         self.profiler.deinit();
 
-        self.context.deinit();
+        self.context.deinit(self.allocator);
         self.allocator.destroy(self.context);
 
         self.ring.deinit(self.allocator);
@@ -408,7 +419,7 @@ pub const RingApp = struct {
         self.app.ring.deinit(self.app.allocator);
         self.app.ring.* = try StackTrieRing.init(self.app.allocator, ring_slots);
         self.app.context.ring = self.app.ring;
-        self.app.context.iptrie = &self.app.ring.stacktries[0];
+        self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
 
         self.app.context.binDurationNanoseconds = slot_ns;
 
@@ -530,7 +541,7 @@ pub const FixedApp = struct {
             self.app.ring.deinit(self.app.allocator);
             self.app.ring.* = try StackTrieRing.init(self.app.allocator, binCount);
             self.app.context.ring = self.app.ring;
-            self.app.context.iptrie = &self.app.ring.stacktries[0];
+            self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
             self.app.context.binDurationNanoseconds = bin_ns;
 
             // Neuter the ring protocol so progressWriterHead never blocks.

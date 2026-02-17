@@ -87,14 +87,6 @@ There are several areas where this project could be improved:
         Navigation is a hack, doesn't work well. Review and fix
 - [ ] **Improved error Handling**:
         Currently we have `UNMAPPED` as our only indication, we can be more robust.
-- [ ] **CI/CD for Release**:
-        Currently, you gotta build. This sucks, I can just vendor for all major platforms.
-- [ ] **Resolve Binary Name**:
-        Currently, I dont grab the binary / proc name! That's a major bug, can just solve that.
-    - [ ] **Resolve TIDs**: 
-        I think it'd be interesting to denote the tids as well as the pids somehow. Maybe ought to be a toggle
-    - [ ] **Denote PIDs**: 
-        I'd like to be able to see the PID of the stuff. Can be done ya?
 - [ ] **Improve rendering**:
         Currently, the drawing works. However, it fully redraws recursively each time. Thats OK, but probably not needed.
         This causes the rendering to take a boat load of time.

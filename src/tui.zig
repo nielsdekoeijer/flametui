@@ -128,14 +128,17 @@ const Layout = struct {
             .flamegraphWindowBegBoundaryY = windowBegY + FlamegraphHBegBoundary,
             .flamegraphWindowEndBoundaryX = windowEndX - FlamegraphWEndBoundary,
             .flamegraphWindowEndBoundaryY = dividerBegY - FlamegraphHEndBoundary,
+
             .flamegraphWindowBegInsideX = windowBegX + FlamegraphWBegInside,
             .flamegraphWindowBegInsideY = windowBegY + FlamegraphHBegInside,
             .flamegraphWindowEndInsideX = windowEndX - FlamegraphWEndInside,
             .flamegraphWindowEndInsideY = dividerBegY - FlamegraphHEndInside,
+
             .infoWindowBegBoundaryX = windowBegX + InfoWBegBoundary,
             .infoWindowBegBoundaryY = dividerBegY + InfoHBegBoundary,
             .infoWindowEndBoundaryX = windowEndX - InfoWBegBoundary,
             .infoWindowEndBoundaryY = windowEndY - InfoHEndBoundary,
+
             .infoWindowBegInsideX = windowBegX + InfoWBegInside,
             .infoWindowBegInsideY = dividerBegY + InfoHBegInside,
             .infoWindowEndInsideX = windowEndX - InfoWBegInside,
@@ -416,10 +419,12 @@ pub const Interface = struct {
     // Start drawing + event loop
     pub fn start(self: *Interface) !void {
         // Create tty handle
-        const buffer: []u8 = try self.allocator.alloc(u8, 4096);
+        const buffer: []u8 = try self.allocator.alloc(u8, 65536);
         defer self.allocator.free(buffer);
         var tty = try vaxis.Tty.init(buffer);
         defer tty.deinit();
+
+        const ttyWriter = tty.writer();
 
         // Start vaxis
         var vx = try vaxis.init(self.allocator, .{});
@@ -455,6 +460,9 @@ pub const Interface = struct {
         try LayoutColors.queryColors(vx, tty.writer());
 
         // Main loop
+        var dirty: bool = true;
+        var lastMouseCol: ?i16 = null;
+        var lastMouseRow: ?i16 = null;
         tui_loop: while (true) {
             var event = self.loop.?.nextEvent();
 
@@ -467,10 +475,14 @@ pub const Interface = struct {
                     .color_report => |c| try self.colors.ingestReport(c),
 
                     // Just stops us from blocking, request redraw workflow
-                    .redraw => {},
+                    .redraw => {
+                        dirty = true;
+                    },
 
                     // Presses
                     .key_press => |key| {
+                        dirty = true;
+
                         // Quit conditions
                         if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                             break :tui_loop;
@@ -591,11 +603,37 @@ pub const Interface = struct {
                     // Resize logic
                     .winsize => |winsize| {
                         try vx.resize(self.allocator, tty.writer(), winsize);
+                        dirty = true;
                     },
 
                     // Mouse
                     .mouse => |m| {
                         mouse = m;
+
+                        if (lastMouseCol) |c| {
+                            if (c != m.col) {
+                                dirty = true;
+                                lastMouseCol = m.col;
+                            }
+                        } else {
+                            dirty = true;
+                            lastMouseCol = m.col;
+                        }
+
+                        if (lastMouseRow) |r| {
+                            if (r != m.row) {
+                                dirty = true;
+                                lastMouseRow = m.row;
+                            }
+                        } else {
+                            dirty = true;
+                            lastMouseRow = m.row;
+                        }
+
+                        // Always dirty on clicks
+                        if (m.button == vaxis.Mouse.Button.left) {
+                            dirty = true;
+                        }
                     },
                 }
 
@@ -607,6 +645,9 @@ pub const Interface = struct {
             }
 
             {
+                if (!dirty) continue :tui_loop;
+                dirty = false;
+
                 self.infoSliceHitCount = null;
                 self.infoSliceHitCountPercentages = null;
                 self.infoSliceSymbol = null;
@@ -617,7 +658,7 @@ pub const Interface = struct {
 
                 const win = vx.window();
                 try self.draw(symbols.nodes.items, win, mouse);
-                try vx.render(tty.writer());
+                try vx.render(ttyWriter);
             }
         }
     }
@@ -1044,6 +1085,8 @@ pub const Interface = struct {
             return;
         }
 
+        if (mouse.row > context.currentY) return;
+
         var childOffset: f32 = context.offsetNormalized;
         var sortBuf: [MaxSortableChildren]SymbolTrie.NodeId = undefined;
         const children = self.sortedChildren(nodes, entry.children.items, &sortBuf);
@@ -1054,6 +1097,10 @@ pub const Interface = struct {
             if (child.hitCount == 0) continue;
 
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
+
+            // early stop
+            const childWidthPixels = childWidth * @as(f32, @floatFromInt(context.widthCells));
+            if (childWidthPixels < 1.0) continue;
 
             try self.handleMouse(nodes, id, mouse, .{
                 .currentX = context.currentX,
@@ -1069,6 +1116,7 @@ pub const Interface = struct {
         }
     }
 
+    // TODO: flatten recursion
     fn drawSymbol(
         self: *Interface,
         nodes: []SymbolTrie.TrieNode,
@@ -1169,6 +1217,10 @@ pub const Interface = struct {
             if (child.hitCount == 0) continue;
 
             const childWidth = @as(f32, @floatFromInt(child.hitCount)) / @as(f32, @floatFromInt(entry.hitCount)) * context.widthNormalized;
+
+            // early stop
+            const childWidthPixels = childWidth * @as(f32, @floatFromInt(context.widthCells));
+            if (childWidthPixels < 1.0) continue;
 
             try self.drawSymbol(nodes, id, win, .{
                 .currentX = context.currentX,

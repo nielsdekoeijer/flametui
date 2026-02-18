@@ -59,10 +59,19 @@ All profiling commands also accept `--verbose` for debug logging and `--enable-i
 
 Before `0.0.3-alpha`:
 - [ ] Review files ensuring tests in place and happy, and refactor the ugly code: 
-    - [ ] src/sharedobject.zig 
-    - [ ] src/symboltrie.zig  
-    - [ ] src/stacktrie.zig  
-    - [ ] src/tui.zig  
+    - [ ] src/app.zig
+    - [ ] src/bpf.zig
+    - [ ] src/cimport.zig
+    - [ ] src/kmap.zig
+    - [ ] src/lock.zig
+    - [ ] src/main.zig
+    - [ ] src/profile.zig
+    - [ ] src/root.zig
+    - [ ] src/sharedobject.zig
+    - [ ] src/stacktrie.zig
+    - [ ] src/symboltrie.zig
+    - [ ] src/tui.zig
+    - [ ] src/umap.zig
 - [ ] Fix the navigation functionality (post sorting)
 - [ ] Lifecycle improvements, ensure memory usage more limited
 

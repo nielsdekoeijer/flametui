@@ -425,12 +425,12 @@ pub fn main() !void {
         .ring => |command| {
             requireRoot(writer, "flametui");
 
-            var app = try flametui.RingApp.init(allocator);
+            var app = try flametui.RingApp.init(allocator, command.n);
             defer app.deinit();
 
             configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            try app.run(command.hz, command.ms * std.time.ns_per_ms, command.n);
+            try app.run(command.hz, command.ms * std.time.ns_per_ms);
         },
         .file => |file| {
             const path = file.file_path orelse unreachable;

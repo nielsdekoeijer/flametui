@@ -30,7 +30,7 @@ const RingProfilerContext = struct {
     binDurationNanoseconds: u64,
 
     /// A reference to a ringbuffer containing stacktries, not owned by us
-    ring: *StackTrieUnmanagedRing,
+    ring: *StackTrieRing,
 
     /// The currently selected iptrie from the ring
     iptrieCurrent: *StackTrieUnmanaged,
@@ -42,7 +42,12 @@ const RingProfilerContext = struct {
     allocator: std.mem.Allocator,
 
     /// Initialize with a reference to an existing stack trie ring
-    pub fn init(allocator: std.mem.Allocator, ring: *StackTrieUnmanagedRing) !RingProfilerContext {
+    pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfilerContext {
+        // init ringbuffer pointer
+        const ring = try allocator.create(StackTrieRing);
+        ring.* = try StackTrieRing.init(allocator, bins);
+        errdefer ring.deinit(allocator);
+
         return .{
             .ring = ring,
             .iptrieCurrent = &ring.stacktries[0],
@@ -56,6 +61,9 @@ const RingProfilerContext = struct {
     /// Clear and invalidate
     pub fn deinit(self: *RingProfilerContext) void {
         self.umapCache.deinit(self.allocator);
+
+        self.ring.deinit(self.allocator);
+        self.allocator.destroy(self.ring);
 
         // invalidate
         defer self.* = undefined;
@@ -87,12 +95,65 @@ const RingProfilerContext = struct {
     }
 };
 
+const FixedContext = struct {
+    stacktries: []StackTrieUnmanaged,
+    currentBin: usize,
+    binStartNanoseconds: ?u64,
+    binDurationNanoseconds: u64,
+    umapCache: UMapCacheUnmanaged,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedContext {
+        const stacktries = try allocator.alloc(StackTrieUnmanaged, bins);
+        errdefer allocator.free(stacktries);
+
+        for (stacktries, 0..) |*st, i| {
+            errdefer for (0..i) |j| stacktries[j].deinit(allocator);
+            st.* = try StackTrieUnmanaged.init(allocator);
+        }
+
+        return .{
+            .stacktries = stacktries,
+            .currentBin = 0,
+            .binStartNanoseconds = null,
+            .binDurationNanoseconds = std.math.maxInt(u64),
+            .umapCache = try UMapCacheUnmanaged.init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *FixedContext) void {
+        self.umapCache.deinit(self.allocator);
+        for (self.stacktries) |*st| st.deinit(self.allocator);
+        self.allocator.free(self.stacktries);
+        self.* = undefined;
+    }
+
+    pub fn callback(self: *FixedContext, event: *const EventTypeRaw) void {
+        const parsed = EventType.init(event);
+
+        if (self.binStartNanoseconds) |*start| {
+            while (parsed.timestamp >= start.* +| self.binDurationNanoseconds) {
+                start.* += self.binDurationNanoseconds;
+                if (self.currentBin + 1 < self.stacktries.len) {
+                    self.currentBin += 1;
+                } else break;
+            }
+        } else {
+            self.binStartNanoseconds = parsed.timestamp;
+        }
+
+        self.stacktries[self.currentBin].add(self.allocator, parsed, &self.umapCache) catch {
+            @panic("Could not add to stacktrie");
+        };
+    }
+};
+
 /// ===================================================================================================================
 /// StackRingBuffer
 /// ===================================================================================================================
 /// Thread-Safe Ring Buffer, inefficient perhaps but easy to understand.
-pub const StackTrieUnmanagedRing = struct {
-    allocator: std.mem.Allocator,
+pub const StackTrieRing = struct {
     stacktries: []StackTrieUnmanaged,
     mutex: std.Thread.Mutex,
 
@@ -106,7 +167,7 @@ pub const StackTrieUnmanagedRing = struct {
     readerTail: usize,
 
     /// Initialize the ring with an empty StackTrieUnmanaged list
-    pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieUnmanagedRing {
+    pub fn init(allocator: std.mem.Allocator, n: usize) !StackTrieRing {
         const stacktries = try allocator.alloc(StackTrieUnmanaged, n);
         errdefer allocator.free(stacktries);
 
@@ -115,8 +176,7 @@ pub const StackTrieUnmanagedRing = struct {
             stacktrie.* = try StackTrieUnmanaged.init(allocator);
         }
 
-        return StackTrieUnmanagedRing{
-            .allocator = allocator,
+        return StackTrieRing{
             .stacktries = stacktries,
             .mutex = .{},
             .writerHead = 0,
@@ -126,7 +186,7 @@ pub const StackTrieUnmanagedRing = struct {
     }
 
     /// Atomic deinit + invalidate
-    pub fn deinit(self: *StackTrieUnmanagedRing, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *StackTrieRing, allocator: std.mem.Allocator) void {
         self.mutex.lock();
 
         for (self.stacktries) |*stacktrie| {
@@ -141,7 +201,7 @@ pub const StackTrieUnmanagedRing = struct {
 
     // Returns the next head, or null if it would exceed the readerTail. If null, the eBPF program simply keeps
     // writing to the same "bucket", i.e. stacktrace.
-    pub fn progressWriterHead(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
+    pub fn progressWriterHead(self: *StackTrieRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -158,7 +218,7 @@ pub const StackTrieUnmanagedRing = struct {
 
     // Returns the next reader head, aka the newest stacktrie. Nominally, this should be 1 behind the writer head.
     // Merges to the symboltrie until null, in which case do nothing.
-    pub fn peekReaderHead(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
+    pub fn peekReaderHead(self: *StackTrieRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -173,7 +233,7 @@ pub const StackTrieUnmanagedRing = struct {
     }
 
     // Pushes reader head one forward
-    pub fn advanceReaderHead(self: *StackTrieUnmanagedRing) void {
+    pub fn advanceReaderHead(self: *StackTrieRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -182,7 +242,7 @@ pub const StackTrieUnmanagedRing = struct {
     }
 
     // Returns the next tail,
-    pub fn peekReaderTail(self: *StackTrieUnmanagedRing) ?*StackTrieUnmanaged {
+    pub fn peekReaderTail(self: *StackTrieRing) ?*StackTrieUnmanaged {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -195,7 +255,7 @@ pub const StackTrieUnmanagedRing = struct {
     }
 
     // Pushes reader tail one forward
-    pub fn advanceReaderTail(self: *StackTrieUnmanagedRing) void {
+    pub fn advanceReaderTail(self: *StackTrieRing) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -240,7 +300,7 @@ pub const SymbolTrieList = struct {
         };
     }
 
-    pub fn mapAtomic(self: *SymbolTrieList, stacktrie: StackTrieUnmanaged, mode: SymbolTrie.MapMode) void {
+    pub fn mapAtomic(self: *SymbolTrieList, stacktrie: StackTrieUnmanaged, mode: SymbolTrie.MapMode) !void {
         const symbols = (self.list.lock().*)[0];
         defer self.list.unlock();
         try symbols.map(stacktrie, mode);
@@ -267,182 +327,170 @@ pub const SymbolTrieList = struct {
 /// ===================================================================================================================
 /// App
 /// ===================================================================================================================
-pub const RingProfiler = struct {
-    allocator: std.mem.Allocator,
+pub fn ProfilerApp(ContextType: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
 
-    /// Ringbuffer that contains stack tries
-    ring: *StackTrieUnmanagedRing,
+        /// eBPF profiler program
+        profiler: ProfilerUnmanaged,
 
-    /// Context for running our profiler
-    context: *RingProfilerContext,
+        /// Thread for handling eBPF callbacks
+        bpfThread: ?std.Thread,
 
-    /// eBPF profiler program
-    profiler: ProfilerUnmanaged,
+        /// Thread for handling tui interactions
+        tuiThread: ?std.Thread,
 
-    /// Thread for handling eBPF callbacks
-    bpfThread: ?std.Thread,
+        /// KMap for symboltries
+        kmap: *KMapUnmanaged,
 
-    /// Thread for handling tui interactions
-    tuiThread: ?std.Thread,
+        /// KMap allocator, using an arena allocator means way faster deinit and init
+        kmapArena: std.heap.ArenaAllocator,
 
-    /// KMap for symboltries
-    kmap: *KMapUnmanaged,
+        /// SymbolTries we make available for drawing
+        symbols: *SymbolTrieList,
 
-    /// KMap allocator, using an arena allocator means way faster deinit and init
-    kmapArena: std.heap.ArenaAllocator,
+        /// Should stop our threads
+        shouldQuit: std.atomic.Value(bool),
 
-    /// SymbolTries we make available for drawing
-    symbols: *SymbolTrieList,
+        /// Our TUI
+        interface: Interface,
 
-    /// Should stop our threads
-    shouldQuit: std.atomic.Value(bool),
+        /// Context
+        context: *ContextType,
 
-    /// Our TUI
-    interface: Interface,
+        pub fn init(allocator: std.mem.Allocator, context: *ContextType, binsSymbolTrie: usize) !@This() {
+            // init profiler
+            var profiler = try ProfilerUnmanaged.init(ContextType, ContextType.callback, allocator, context);
+            errdefer profiler.deinit(allocator);
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfiler {
-        // init ringbuffer pointer
-        const ring = try allocator.create(StackTrieUnmanagedRing);
-        ring.* = try StackTrieUnmanagedRing.init(allocator, 16);
-        errdefer ring.deinit(allocator);
+            // init kmapArena
+            var kmapArena = std.heap.ArenaAllocator.init(allocator);
+            errdefer kmapArena.deinit();
 
-        // init profiler context pointer
-        const context = try allocator.create(RingProfilerContext);
-        context.* = try RingProfilerContext.init(allocator, ring);
-        errdefer context.deinit();
+            // init kmap
+            const kmap = try allocator.create(KMapUnmanaged);
+            kmap.* = try KMapUnmanaged.init(kmapArena.allocator());
+            errdefer kmap.deinit(kmapArena.allocator());
 
-        // init profiler
-        var profiler = try ProfilerUnmanaged.init(RingProfilerContext, RingProfilerContext.callback, allocator, context);
-        errdefer profiler.deinit(allocator);
+            // init symbol list
+            const symbols = try allocator.create(SymbolTrieList);
+            symbols.* = try SymbolTrieList.init(allocator, kmap, binsSymbolTrie);
+            errdefer symbols.deinit();
 
-        // init kmapArena
-        var kmapArena = std.heap.ArenaAllocator.init(allocator);
-        errdefer kmapArena.deinit();
+            // init tui with the symbols
+            var interface = try Interface.init(allocator, symbols);
+            interface.missed = &profiler.globals.map.dropped_events;
+            errdefer interface.deinit();
 
-        // init kmap
-        const kmap = try allocator.create(KMapUnmanaged);
-        kmap.* = try KMapUnmanaged.init(kmapArena.allocator());
-        errdefer kmap.deinit(kmapArena.allocator());
-
-        // init symbol list
-        const symbols = try allocator.create(SymbolTrieList);
-        symbols.* = try SymbolTrieList.init(allocator, kmap, bins);
-        errdefer symbols.deinit();
-
-        // init tui
-        var interface = try Interface.init(allocator, symbols);
-        interface.missed = &profiler.globals.map.dropped_events;
-        errdefer interface.deinit();
-
-        return RingProfiler{
-            .allocator = allocator,
-            .ring = ring,
-            .context = context,
-            .profiler = profiler,
-            .kmap = kmap,
-            .kmapArena = kmapArena,
-            .symbols = symbols,
-            .interface = interface,
-            .bpfThread = null,
-            .tuiThread = null,
-            .shouldQuit = std.atomic.Value(bool).init(false),
-        };
-    }
-
-    pub fn deinit(self: *RingProfiler) void {
-        self.stop();
-
-        self.symbols.deinit(self.allocator);
-        self.allocator.destroy(self.symbols);
-
-        self.kmap.deinit(self.kmapArena.allocator());
-        self.allocator.destroy(self.kmap);
-
-        self.kmapArena.deinit();
-
-        self.profiler.deinit(self.allocator);
-
-        self.context.deinit();
-        self.allocator.destroy(self.context);
-
-        self.ring.deinit(self.allocator);
-        self.allocator.destroy(self.ring);
-    }
-
-    /// Start running the application
-    fn start(self: *RingProfiler, rate: usize) !void {
-        self.shouldQuit.store(false, .release);
-        errdefer self.stop();
-
-        if (self.bpfThread != null) return error.ThreadAlreadyRunning;
-        self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
-
-        if (self.tuiThread != null) return error.ThreadAlreadyRunning;
-        self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
-    }
-
-    /// Stop the application from running by joining threads
-    fn stop(self: *RingProfiler) void {
-        self.shouldQuit.store(true, .release);
-
-        if (self.bpfThread) |t| t.join();
-        self.bpfThread = null;
-
-        if (self.tuiThread) |t| t.join();
-        self.tuiThread = null;
-    }
-
-    /// Worker thread, draining bpf events
-    fn bpfWorker(self: *RingProfiler, rate: usize) void {
-        self.profiler.start(self.allocator, rate) catch {
-            @panic("Could not start profiler");
-        };
-
-        while (!self.shouldQuit.load(.acquire)) {
-            while (true) {
-                const count = self.profiler.ring.consume() catch break;
-                if (count == 0) break;
-            }
-
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            return .{
+                .allocator = allocator,
+                .context = context,
+                .profiler = profiler,
+                .kmap = kmap,
+                .kmapArena = kmapArena,
+                .symbols = symbols,
+                .interface = interface,
+                .bpfThread = null,
+                .tuiThread = null,
+                .shouldQuit = std.atomic.Value(bool).init(false),
+            };
         }
 
-        self.profiler.stop(self.allocator);
-    }
+        pub fn deinit(self: *@This()) void {
+            self.stop();
 
-    /// Manages the tui
-    fn tuiWorker(self: *RingProfiler) void {
-        self.interface.start() catch {
-            @panic("Could not start TUI");
-        };
+            self.symbols.deinit(self.allocator);
+            self.allocator.destroy(self.symbols);
 
-        self.shouldQuit.store(true, .release);
-    }
-};
+            self.kmap.deinit(self.kmapArena.allocator());
+            self.allocator.destroy(self.kmap);
+
+            self.kmapArena.deinit();
+
+            self.profiler.deinit(self.allocator);
+        }
+
+        /// Start running the application
+        fn start(self: *@This(), rate: usize) !void {
+            self.shouldQuit.store(false, .release);
+            errdefer self.stop();
+
+            if (self.bpfThread != null) return error.ThreadAlreadyRunning;
+            self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+
+            if (self.tuiThread != null) return error.ThreadAlreadyRunning;
+            self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
+        }
+
+        /// Stop the application from running by joining threads
+        fn stop(self: *@This()) void {
+            self.shouldQuit.store(true, .release);
+
+            if (self.bpfThread) |t| t.join();
+            self.bpfThread = null;
+
+            if (self.tuiThread) |t| t.join();
+            self.tuiThread = null;
+        }
+
+        /// Worker thread, draining bpf events
+        fn bpfWorker(self: *@This(), rate: usize) void {
+            self.profiler.start(self.allocator, rate) catch {
+                @panic("Could not start profiler");
+            };
+
+            while (!self.shouldQuit.load(.acquire)) {
+                while (true) {
+                    const count = self.profiler.ring.consume() catch break;
+                    if (count == 0) break;
+                }
+
+                std.Thread.sleep(5 * std.time.ns_per_ms);
+            }
+
+            self.profiler.stop(self.allocator);
+        }
+
+        /// Manages the tui
+        fn tuiWorker(self: *@This()) void {
+            self.interface.start() catch {
+                @panic("Could not start TUI");
+            };
+
+            self.shouldQuit.store(true, .release);
+        }
+    };
+}
 
 /// ===================================================================================================================
 /// Ring (--ring)
 /// ===================================================================================================================
 /// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
 pub const RingApp = struct {
-    app: RingProfiler,
+    allocator: std.mem.Allocator,
+    context: *RingProfilerContext,
+    app: ProfilerApp(RingProfilerContext),
 
-    pub fn init(allocator: std.mem.Allocator) !RingApp {
+    pub fn init(allocator: std.mem.Allocator, binsStackTrie: usize) !RingApp {
+        const context = try allocator.create(RingProfilerContext);
+        errdefer allocator.destroy(context);
+        context.* = try RingProfilerContext.init(allocator, binsStackTrie);
+        errdefer context.deinit();
+
         return .{
-            .app = try RingProfiler.init(allocator, 1),
+            .allocator = allocator,
+            .context = context,
+            .app = try ProfilerApp(RingProfilerContext).init(allocator, context, 1),
         };
     }
 
     pub fn deinit(self: *RingApp) void {
         self.app.deinit();
+        self.context.deinit();
+        self.allocator.destroy(self.context);
     }
 
-    pub fn run(self: *RingApp, rate: usize, slotNanoseconds: u64, ringSlots: usize) !void {
-        // Reinitialize ring with requested size
-        self.app.ring.deinit(self.app.allocator);
-        self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, ringSlots);
-        self.app.context.ring = self.app.ring;
-        self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
+    pub fn run(self: *RingApp, rate: usize, slotNanoseconds: u64) !void {
         self.app.context.binDurationNanoseconds = slotNanoseconds;
 
         try self.app.start(rate);
@@ -450,21 +498,22 @@ pub const RingApp = struct {
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
 
-            if (self.app.ring.peekReaderTail()) |stack_trie| {
+            if (self.app.context.ring.peekReaderTail()) |stack_trie| {
                 // Remove all stale stacktries from the symboltrie
-                self.app.symbols.mapAtomic(stack_trie, .evict);
+                try self.app.symbols.mapAtomic(stack_trie.*, .evict);
 
                 // Reset the stacktrie so it can be reused
                 stack_trie.reset(self.app.allocator);
-                self.app.ring.advanceReaderTail();
+                self.app.context.ring.advanceReaderTail();
 
                 shouldRedraw = true;
             }
 
-            while (self.app.ring.peekReaderHead()) |stack_trie| {
+            while (self.app.context.ring.peekReaderHead()) |stack_trie| {
                 // Merge in all the fresh stacktries
-                self.app.symbols.mapAtomic(stack_trie, .merge);
-                self.app.ring.advanceReaderHead();
+                try self.app.symbols.mapAtomic(stack_trie.*, .merge);
+
+                self.app.context.ring.advanceReaderHead();
 
                 shouldRedraw = true;
             }
@@ -485,37 +534,48 @@ pub const RingApp = struct {
 /// ===================================================================================================================
 /// Aggregate indefinitely. Streams results to TUI, never evicts.
 pub const AggregateApp = struct {
-    app: RingProfiler,
+    allocator: std.mem.Allocator,
+    context: *RingProfilerContext,
+    app: ProfilerApp(RingProfilerContext),
 
     pub fn init(allocator: std.mem.Allocator) !AggregateApp {
+        const context = try allocator.create(RingProfilerContext);
+        errdefer allocator.destroy(context);
+        context.* = try RingProfilerContext.init(allocator, 4);
+        errdefer context.deinit();
+
         return .{
-            .app = try RingProfiler.init(allocator, 1),
+            .allocator = allocator,
+            .context = context,
+            .app = try ProfilerApp(RingProfilerContext).init(allocator, context, 1),
         };
     }
 
     pub fn deinit(self: *AggregateApp) void {
         self.app.deinit();
+        self.context.deinit();
+        self.allocator.destroy(self.context);
     }
 
     pub fn run(self: *AggregateApp, rate: usize) !void {
-        // Rotate the ring, but never evict old data
         self.app.context.binDurationNanoseconds = 50 * std.time.ns_per_ms;
-
         try self.app.start(rate);
-        const merge_interval = 16 * std.time.ns_per_ms;
+
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
 
-            while (self.app.ring.peekReaderTail()) |stack_trie| {
+            while (self.app.context.ring.peekReaderTail()) |stack_trie| {
                 // Remove all stale stacktries from the symboltrie
                 stack_trie.reset(self.app.allocator);
-                self.app.ring.advanceReaderTail();
+                self.app.context.ring.advanceReaderTail();
             }
 
-            while (self.app.ring.peekReaderHead()) |stack_trie| {
+            while (self.app.context.ring.peekReaderHead()) |stack_trie| {
                 // Merge in all the fresh stacktries
-                self.app.symbols.mapAtomic(stack_trie, .merge);
-                self.app.ring.advanceReaderHead();
+                try self.app.symbols.mapAtomic(stack_trie.*, .merge);
+
+                self.app.context.ring.advanceReaderHead();
+
                 shouldRedraw = true;
             }
 
@@ -525,7 +585,7 @@ pub const AggregateApp = struct {
                 }
             }
 
-            std.Thread.sleep(merge_interval);
+            std.Thread.sleep(16 * std.time.ns_per_ms);
         }
     }
 };
@@ -535,79 +595,59 @@ pub const AggregateApp = struct {
 /// ===================================================================================================================
 /// Fixed duration measurement. Profile, then display the result. No streaming.
 pub const FixedApp = struct {
-    app: RingProfiler,
+    allocator: std.mem.Allocator,
+    context: *FixedContext,
+    app: ProfilerApp(FixedContext),
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedApp {
+    pub fn init(allocator: std.mem.Allocator, binsStackTrie: usize) !FixedApp {
+        const bins = @max(binsStackTrie, 1);
+        const context = try allocator.create(FixedContext);
+        errdefer allocator.destroy(context);
+        context.* = try FixedContext.init(allocator, bins);
+        errdefer context.deinit();
+
         return .{
-            .app = try RingProfiler.init(allocator, bins),
+            .allocator = allocator,
+            .context = context,
+            .app = try ProfilerApp(FixedContext).init(allocator, context, bins),
         };
     }
 
     pub fn deinit(self: *FixedApp) void {
         self.app.deinit();
+        self.context.deinit();
+        self.allocator.destroy(self.context);
     }
 
     pub fn run(self: *FixedApp, rate: usize, timeout_ns: u64) !void {
-        const binCount = blk: {
-            const symbols = self.app.symbols.list.lock();
-            defer self.app.symbols.list.unlock();
-            break :blk symbols.len;
-        };
+        const binCount = self.context.stacktries.len;
 
         if (binCount > 1) {
-            const bin_ns = timeout_ns / binCount;
-
-            self.app.ring.deinit(self.app.allocator);
-            self.app.ring.* = try StackTrieUnmanagedRing.init(self.app.allocator, binCount);
-            self.app.context.ring = self.app.ring;
-            self.app.context.iptrieCurrent = &self.app.ring.stacktries[0];
-            self.app.context.binDurationNanoseconds = bin_ns;
-
-            // Neuter the ring protocol so progressWriterHead never blocks.
-            // TODO: probably make a thing that just uses a list rather than the existing ring
-            self.app.ring.writerHead = 0;
-            self.app.ring.readerHead = 0;
-            self.app.ring.readerTail = 0;
-
-            try self.app.profiler.start(self.app.allocator, rate);
-            defer self.app.profiler.stop(self.app.allocator);
-
-            var timer = try std.time.Timer.start();
-
-            while (timer.read() < timeout_ns) {
-                const count = try self.app.profiler.ring.consume();
-
-                if (count == 0) {
-                    try self.app.profiler.ring.poll(10);
-                }
-            }
-
-            // Map ring slot i -> symbol trie i
-            for (0..binCount) |i| {
-                const symbols = self.app.symbols.list.lock();
-                defer self.app.symbols.list.unlock();
-                if (self.app.ring.stacktries[i].nodes.items[StackTrieUnmanaged.RootId].hitCount > 0) {
-                    try (symbols.*)[i].map(self.app.ring.stacktries[i], .merge);
-                }
-            }
+            self.context.binDurationNanoseconds = timeout_ns / binCount;
         } else {
-            self.app.context.binDurationNanoseconds = std.math.maxInt(u64);
+            self.context.binDurationNanoseconds = std.math.maxInt(u64);
+        }
+        self.context.currentBin = 0;
+        self.context.binStartNanoseconds = null;
 
-            try self.app.profiler.start(self.app.allocator, rate);
-            defer self.app.profiler.stop(self.app.allocator);
+        try self.app.profiler.start(self.allocator, rate);
+        defer self.app.profiler.stop(self.allocator);
 
-            var timer = try std.time.Timer.start();
-            while (timer.read() < timeout_ns) {
-                const count = try self.app.profiler.ring.consume();
-                if (count == 0) {
-                    try self.app.profiler.ring.poll(10);
-                }
+        var timer = try std.time.Timer.start();
+        while (timer.read() < timeout_ns) {
+            const count = try self.app.profiler.ring.consume();
+            if (count == 0) {
+                try self.app.profiler.ring.poll(10);
             }
+        }
 
-            {
-                const symbols = self.app.symbols.list.lock().*[0];
-                defer self.app.symbols.list.unlock();
-                try symbols.map(self.app.ring.stacktries[0], .merge);
+        {
+            const list = self.app.symbols.list.lock();
+            defer self.app.symbols.list.unlock();
+            for (0..binCount) |i| {
+                if (self.context.stacktries[i].nodes.items[StackTrieUnmanaged.RootId].hitCount > 0) {
+                    try (list.*)[i].map(self.context.stacktries[i], .merge);
+                }
             }
         }
 

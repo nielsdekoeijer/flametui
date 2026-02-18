@@ -358,42 +358,45 @@ pub const UMapUnmanaged = union(enum) {
             // 7f6687c77000-7f6687c79000 r--p 00000000 103:02 19553864                  /path/to/prog1
             // 7f6687c79000-7f6687c7c000 r-xp 00002000 103:02 19553864                  /path/to/prog2
             // ```
-            var line_iter = std.mem.tokenizeAny(u8, line, " ");
+            var lineIter = std.mem.tokenizeAny(u8, line, " ");
 
             // Map address range
-            const map = line_iter.next() orelse return error.UMapParseError;
-            var map_iter = std.mem.splitScalar(u8, map, '-');
-            const map_beg_string = map_iter.next() orelse return error.UMapParseError;
-            const map_end_string = map_iter.next() orelse return error.UMapParseError;
-            const map_beg = try std.fmt.parseInt(u64, map_beg_string, 16);
-            const map_end = try std.fmt.parseInt(u64, map_end_string, 16);
+            const map = lineIter.next() orelse return error.UMapParseError;
+            var mapIter = std.mem.splitScalar(u8, map, '-');
+
+            const mapBegString = mapIter.next() orelse return error.UMapParseError;
+            const mapBeg = try std.fmt.parseInt(u64, mapBegString, 16);
+
+            const mapEndString = mapIter.next() orelse return error.UMapParseError;
+            const mapEnd = try std.fmt.parseInt(u64, mapEndString, 16);
 
             // Skip perms, aren't interesting currently
-            const perms = line_iter.next() orelse return error.UMapParseError;
+            const perms = lineIter.next() orelse return error.UMapParseError;
             _ = perms;
 
             // Get offset
-            const offset_string = line_iter.next() orelse return error.UMapParseError;
-            const offset = try std.fmt.parseInt(u64, offset_string, 16);
+            const offsetString = lineIter.next() orelse return error.UMapParseError;
+            const offset = try std.fmt.parseInt(u64, offsetString, 16);
 
             // Skip device, aren't interesting currently
-            const device = line_iter.next() orelse return error.UMapParseError;
+            const device = lineIter.next() orelse return error.UMapParseError;
             _ = device;
 
             // Skip inode, aren't interesting currently
-            const inode = line_iter.next() orelse return error.UMapParseError;
+            const inode = lineIter.next() orelse return error.UMapParseError;
             _ = inode;
 
             // Take dll path
-            const dll_path = line_iter.rest();
+            const dllPath = lineIter.rest();
 
-            const owned_path = try allocator.dupe(u8, dll_path);
-            errdefer allocator.free(owned_path);
+            const ownedPath = try allocator.dupe(u8, dllPath);
+            errdefer allocator.free(ownedPath);
+
             try backend.append(allocator, .{
-                .addressBeg = map_beg,
-                .addressEnd = map_end,
+                .addressBeg = mapBeg,
+                .addressEnd = mapEnd,
                 .offset = offset,
-                .path = owned_path,
+                .path = ownedPath,
             });
         }
     }

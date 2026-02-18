@@ -65,14 +65,11 @@ Before `0.0.3-alpha`:
     - [ ] src/tui.zig  
 - [ ] Fix the navigation functionality (post sorting)
 - [ ] Lifecycle improvements, ensure memory usage more limited
-- [ ] Resolve binary names or comm (currently forgot to do this)
 
 There are several areas where this project could be improved:
 
 - [ ] **Help Menu**: 
         To see what the keybindings are. Not important currently, cause I dont have keybindings.
-- [ ] **Sorting**: 
-        Either by name (idiomatic flamegraphs) or by hitcount.
 - [ ] **Lifecycle Improvements**: 
         PIDs die, PIDs are born. We don't track that, so a PID can die, and come back and
         our current caching mechanism just gets it wrong... Fix this, potentially by tracking some more things in bpf.
@@ -85,8 +82,6 @@ There are several areas where this project could be improved:
         Plug into build.zig to have an e.g. `zig build profile` step.
 - [ ] **Fix Bug in Navigation:**
         Navigation is a hack, doesn't work well. Review and fix
-- [ ] **Improved error Handling**:
-        Currently we have `UNMAPPED` as our only indication, we can be more robust.
 - [ ] **Improve rendering**:
         Currently, the drawing works. However, it fully redraws recursively each time. Thats OK, but probably not needed.
         This causes the rendering to take a boat load of time.

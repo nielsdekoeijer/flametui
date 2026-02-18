@@ -26,6 +26,19 @@ pub const UMapCacheUnmanaged = struct {
         };
     }
 
+    pub fn deinit(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator) void {
+        for (self.backend.values()) |*entry| {
+            switch (entry.*) {
+                .loaded => |*item| item.deinit(allocator),
+                else => {},
+            }
+        }
+
+        self.backend.deinit(allocator);
+
+        self.* = undefined;
+    }
+
     /// Return entry given pid, or create it
     pub fn find(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator, pid: PID) !*UMapUnmanaged {
         // Try to find it
@@ -56,19 +69,6 @@ pub const UMapCacheUnmanaged = struct {
         // Fail unreachable, we just added it
         unreachable;
     }
-
-    pub fn deinit(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator) void {
-        for (self.backend.values()) |*entry| {
-            switch (entry.*) {
-                .loaded => |*item| item.deinit(allocator),
-                else => {},
-            }
-        }
-
-        self.backend.deinit(allocator);
-
-        self.* = undefined;
-    }
 };
 
 /// Userspace process map entry, essentially a model of a line in /proc/*/maps.
@@ -85,7 +85,13 @@ pub const UMapEntryUnmanaged = struct {
     /// Ending of the address range
     addressEnd: u64,
 
-    /// Deep copy
+    pub fn deinit(self: *UMapEntryUnmanaged, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+
+        self.* = undefined;
+    }
+
+    /// Create a deep copy of a given UMapEntry
     pub fn dupe(self: UMapEntryUnmanaged, allocator: std.mem.Allocator) !UMapEntryUnmanaged {
         return UMapEntryUnmanaged{
             .path = try allocator.dupe(u8, self.path),
@@ -113,12 +119,6 @@ pub const UMapEntryUnmanaged = struct {
 
         // Ensure different allocation
         try std.testing.expect(duped.path.ptr != original.path.ptr);
-    }
-
-    pub fn deinit(self: *UMapEntryUnmanaged, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
-
-        self.* = undefined;
     }
 };
 
@@ -299,7 +299,7 @@ pub const UMapUnmanaged = union(enum) {
         // Populate internals + sort based on instruction pointer enabling binary search. Because we rather show
         // the user something rather than nothing, for now return an unmapped instance.
         try populate(allocator, &backend, &fbs);
-        sort(&backend);
+        sort(backend.items);
 
         std.log.info("Creating UMap with pid {} OK", .{pid});
         return .{
@@ -311,13 +311,37 @@ pub const UMapUnmanaged = union(enum) {
     }
 
     /// Sorts the map in ascending order for binary search
-    fn sort(backend: *std.ArrayListUnmanaged(UMapEntryUnmanaged)) void {
+    fn sort(backend: []UMapEntryUnmanaged) void {
         // Sort the map so it is easier to search at a later stage
-        std.sort.block(UMapEntryUnmanaged, backend.items, {}, struct {
+        std.sort.block(UMapEntryUnmanaged, backend, {}, struct {
             fn lessThan(_: void, a: UMapEntryUnmanaged, b: UMapEntryUnmanaged) bool {
                 return a.addressBeg < b.addressBeg;
             }
         }.lessThan);
+    }
+
+    test "umap.UMapUnmanaged.sort works as intended" {
+        var inp = [_]UMapEntryUnmanaged {
+            UMapEntryUnmanaged{
+                .addressBeg = 1,
+                .path = "A",
+                .addressEnd = 0,
+                .offset = 0,
+            },
+            UMapEntryUnmanaged{
+                .addressBeg = 0,
+                .path = "B",
+                .addressEnd = 0,
+                .offset = 0,
+            },
+        };
+
+        sort(&inp);
+
+        try std.testing.expectEqual(0, inp[0].addressBeg);
+        try std.testing.expectEqual(1, inp[1].addressBeg);
+        try std.testing.expect(std.mem.eql(u8, "B", inp[0].path));
+        try std.testing.expect(std.mem.eql(u8, "A", inp[1].path));
     }
 
     fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(UMapEntryUnmanaged), reader: anytype) !void {

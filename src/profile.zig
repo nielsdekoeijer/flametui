@@ -114,19 +114,19 @@ const ProfileFunctionName = "do_sample";
 /// ===================================================================================================================
 /// Wrapper around our profiling ebpf program
 pub const ProfilerUnmanaged = struct {
-    // Owned copy of our bpf code
+    /// Owned copy of our bpf code
     bytecode: []align(8) const u8,
 
-    // Wrapper around a bpf object
+    /// Wrapper around a bpf object
     object: bpf.Object,
 
-    // Connections of our bpf object, stays alive
+    /// Connections of our bpf object, stays alive
     links: ?[]bpf.Object.Link,
 
-    // Ringbuffer inside our ebpf program
+    /// Ringbuffer inside our ebpf program
     ring: bpf.Object.RingBuffer,
 
-    // Global values for our bpf object
+    /// Global values for our bpf object
     globals: bpf.Object.Map(Definitions.globals_t),
 
     pub fn init(

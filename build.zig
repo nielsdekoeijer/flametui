@@ -92,6 +92,7 @@ pub fn ebpfModuleFromCSource(b: *std.Build, target: std.Build.ResolvedTarget, na
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
     const libbpf = libbpfGetDependency(b, target, optimize);
     const libvaxis = libvaxisGetDependency(b, target, optimize);
 

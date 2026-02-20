@@ -1,8 +1,8 @@
 .{
     .name = .flametui,
-    .version = "0.0.0",
+    .version = "0.0.2",
     .fingerprint = 0xa49cac35a339f9c0,
-    .minimum_zig_version = "0.16.0-dev.2223+4f16e80ce",
+    .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .vmlinux_src = .{
             .url = "git+https://github.com/libbpf/vmlinux.h/#75bb40ae15adf8905b49c81be3e9c02e62309f37",

@@ -4,27 +4,29 @@ const flametui = @import("flametui");
 /// ===================================================================================================================
 /// Logging
 /// ===================================================================================================================
-/// Pass our handle
-pub const std_options: std.Options = .{
-    .logFn = logHandle,
+const Logging = struct {
+    /// Global to parameterize the logging
+    var VerboseLogEnabled: bool = false;
+
+    /// Log function
+    fn handle(
+        comptime level: std.log.Level,
+        comptime scope: @Type(.enum_literal),
+        comptime format: []const u8,
+        args: anytype,
+    ) void {
+        if (!VerboseLogEnabled) {
+            return;
+        }
+
+        std.log.defaultLog(level, scope, format, args);
+    }
 };
 
-/// Global to parameterize the logging
-var VerboseLogEnabled: bool = false;
-
-/// Log function
-fn logHandle(
-    comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (!VerboseLogEnabled) {
-        return;
-    }
-
-    std.log.defaultLog(level, scope, format, args);
-}
+/// Pass our handle
+pub const std_options: std.Options = .{
+    .logFn = Logging.handle,
+};
 
 /// ===================================================================================================================
 /// Helper
@@ -366,7 +368,7 @@ const Options = struct {
         _ = args;
         if (std.mem.eql(u8, arg, "--verbose")) {
             general.verbose = true;
-            VerboseLogEnabled = true;
+            Logging.VerboseLogEnabled = true;
             return true;
         } else if (std.mem.eql(u8, arg, "--enable-idle")) {
             general.enable_idle = true;

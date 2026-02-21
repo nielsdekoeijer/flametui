@@ -228,14 +228,17 @@ pub const Object = struct {
 // Libbpf logging forwarding
 // --------------------------------------------------------------------------------------------------------------------
 /// Unfortunately, the underlying C structure generated seems to change per platform, perhaps because of various
-/// defines. Thus, we must switch here between the types.
-const PlatformVAList = blk: switch (@import("builtin").cpu.arch) {
-    .aarch64 => break :blk c.struct___va_list_1,
-    else => break :blk [*c]c.struct___va_list_tag_1,
-};
+/// defines. Thus, we infer it using compiletime reflection.
+pub fn DetermineFunctionArgumentType(comptime func: anytype, comptime index: usize) type {
+    return @typeInfo(@typeInfo(@typeInfo(func).optional.child).pointer.child).@"fn".params[index].type.?;
+}
 
 /// Logger that can be passed to libbpf, which forwards logs to zig logger
-fn log(level: c.enum_libbpf_print_level, fmt: [*c]const u8, ap: PlatformVAList) callconv(.c) c_int {
+fn log(
+    level: c.enum_libbpf_print_level,
+    fmt: [*c]const u8,
+    ap: DetermineFunctionArgumentType(c.libbpf_print_fn_t, 2),
+) callconv(.c) c_int {
     // Format print into buf from libc
     var buf: [1024]u8 = undefined;
     const len_c = c.vsnprintf(&buf, buf.len, fmt, ap);

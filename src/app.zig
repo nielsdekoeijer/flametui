@@ -22,6 +22,8 @@ const ThreadSafe = @import("lock.zig").ThreadSafe;
 /// ===================================================================================================================
 /// Callback Contexts
 /// ===================================================================================================================
+/// A profiler backed by a ringbuffer of stack tries. The ringbuffer implementation effectively generalizes a
+/// triple buffer useful for drawing while measuring.
 const RingProfilerContext = struct {
     /// The starting timestamp of the current bin in nanoseconds
     binStartNanoseconds: ?u64,
@@ -29,8 +31,8 @@ const RingProfilerContext = struct {
     /// The duration of a bin in nanoseconds
     binDurationNanoseconds: u64,
 
-    /// A reference to a ringbuffer containing stacktries, not owned by us
-    ring: *StackTrieRing,
+    /// A reference to a ringbuffer containing stacktries
+    stacktries: *StackTrieRing,
 
     /// The currently selected iptrie from the ring
     iptrieCurrent: *StackTrieUnmanaged,
@@ -41,16 +43,15 @@ const RingProfilerContext = struct {
     /// We manage an allocator due to the callback
     allocator: std.mem.Allocator,
 
-    /// Initialize with a reference to an existing stack trie ring
     pub fn init(allocator: std.mem.Allocator, bins: usize) !RingProfilerContext {
         // init ringbuffer pointer
-        const ring = try allocator.create(StackTrieRing);
-        ring.* = try StackTrieRing.init(allocator, bins);
-        errdefer ring.deinit(allocator);
+        const stacktries = try allocator.create(StackTrieRing);
+        stacktries.* = try StackTrieRing.init(allocator, bins);
+        errdefer stacktries.deinit(allocator);
 
         return .{
-            .ring = ring,
-            .iptrieCurrent = &ring.stacktries[0],
+            .stacktries = stacktries,
+            .iptrieCurrent = &stacktries.stacktries[0],
             .umapCache = try UMapCacheUnmanaged.init(allocator),
             .binStartNanoseconds = null,
             .binDurationNanoseconds = 100 * std.time.ns_per_ms,
@@ -58,12 +59,11 @@ const RingProfilerContext = struct {
         };
     }
 
-    /// Clear and invalidate
     pub fn deinit(self: *RingProfilerContext) void {
         self.umapCache.deinit(self.allocator);
 
-        self.ring.deinit(self.allocator);
-        self.allocator.destroy(self.ring);
+        self.stacktries.deinit(self.allocator);
+        self.allocator.destroy(self.stacktries);
 
         // invalidate
         defer self.* = undefined;
@@ -76,7 +76,7 @@ const RingProfilerContext = struct {
             while (parsed.timestamp >= binStartNanoseconds.* +| context.binDurationNanoseconds) {
                 binStartNanoseconds.* += context.binDurationNanoseconds;
 
-                if (context.ring.progressWriterHead()) |new| {
+                if (context.stacktries.progressWriterHead()) |new| {
                     context.iptrieCurrent = new;
                     context.iptrieCurrent.reset(context.allocator);
                 } else {
@@ -84,7 +84,7 @@ const RingProfilerContext = struct {
                 }
             }
         } else {
-            // Populate if not yet defined
+            // Populate if not yet defined, aka the first measurement
             context.binStartNanoseconds = parsed.timestamp;
         }
 
@@ -95,12 +95,25 @@ const RingProfilerContext = struct {
     }
 };
 
+/// A context for a fixed measurement. In the case of the fixed measurement, we may precompute the number of
+/// stacktries required.
 const FixedContext = struct {
-    stacktries: []StackTrieUnmanaged,
-    currentBin: usize,
+    /// The starting timestamp of the current bin in nanoseconds
     binStartNanoseconds: ?u64,
+
+    /// The duration of a bin in nanoseconds
     binDurationNanoseconds: u64,
+
+    /// A list of stacktries
+    stacktries: []StackTrieUnmanaged,
+
+    /// The index of the current stacktrie
+    binCurrent: usize,
+
+    /// A cache to loaded umaps, to be shared between iptries to accelerate searches
     umapCache: UMapCacheUnmanaged,
+
+    /// We manage an allocator due to the callback, doesn't play nice with unmanaged design
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedContext {
@@ -114,7 +127,7 @@ const FixedContext = struct {
 
         return .{
             .stacktries = stacktries,
-            .currentBin = 0,
+            .binCurrent = 0,
             .binStartNanoseconds = null,
             .binDurationNanoseconds = std.math.maxInt(u64),
             .umapCache = try UMapCacheUnmanaged.init(allocator),
@@ -126,6 +139,8 @@ const FixedContext = struct {
         self.umapCache.deinit(self.allocator);
         for (self.stacktries) |*st| st.deinit(self.allocator);
         self.allocator.free(self.stacktries);
+
+        // invalidate
         self.* = undefined;
     }
 
@@ -135,15 +150,16 @@ const FixedContext = struct {
         if (self.binStartNanoseconds) |*start| {
             while (parsed.timestamp >= start.* +| self.binDurationNanoseconds) {
                 start.* += self.binDurationNanoseconds;
-                if (self.currentBin + 1 < self.stacktries.len) {
-                    self.currentBin += 1;
+                if (self.binCurrent + 1 < self.stacktries.len) {
+                    self.binCurrent += 1;
                 } else break;
             }
         } else {
             self.binStartNanoseconds = parsed.timestamp;
         }
 
-        self.stacktries[self.currentBin].add(self.allocator, parsed, &self.umapCache) catch {
+        // Cannot throw, so panic on error
+        self.stacktries[self.binCurrent].add(self.allocator, parsed, &self.umapCache) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -306,6 +322,18 @@ pub const SymbolTrieList = struct {
         try symbols.map(stacktrie, mode);
     }
 
+    pub fn lock(self: *SymbolTrieList) !void {
+        _ = self.list.lock();
+    }
+
+    pub fn mapUnsafe(self: *SymbolTrieList, stacktrie: StackTrieUnmanaged, mode: SymbolTrie.MapMode) !void {
+        try (self.list.data.*)[0].map(stacktrie, mode);
+    }
+
+    pub fn unlock(self: *SymbolTrieList) void {
+        defer self.list.unlock();
+    }
+
     pub fn deinit(self: *SymbolTrieList, allocator: std.mem.Allocator) void {
         {
             const list = self.list.lock();
@@ -327,6 +355,7 @@ pub const SymbolTrieList = struct {
 /// ===================================================================================================================
 /// App
 /// ===================================================================================================================
+/// Profiler backed by generic context
 pub fn ProfilerApp(ContextType: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -439,13 +468,19 @@ pub fn ProfilerApp(ContextType: type) type {
                 @panic("Could not start profiler");
             };
 
+            const interval = std.time.ns_per_s / rate;
             while (!self.shouldQuit.load(.acquire)) {
-                while (true) {
-                    const count = self.profiler.ring.consume() catch break;
-                    if (count == 0) break;
+                var timer = std.time.Timer.start() catch unreachable;
+
+                var count: usize = std.math.maxInt(usize);
+                while (count != 0) {
+                    count = self.profiler.ring.consume() catch break;
                 }
 
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                const elapsed = timer.read();
+                if (elapsed < interval) {
+                    std.Thread.sleep(interval - elapsed);
+                }
             }
 
             self.profiler.stop(self.allocator);
@@ -494,37 +529,48 @@ pub const RingApp = struct {
         self.app.context.binDurationNanoseconds = slotNanoseconds;
 
         try self.app.start(rate);
-        const merge_interval = 16 * std.time.ns_per_ms;
+
+        const interval = slotNanoseconds;
         while (!self.app.shouldQuit.load(.acquire)) {
-            var shouldRedraw = false;
+            var timer = try std.time.Timer.start();
+            {
+                var shouldRedraw = false;
 
-            if (self.app.context.ring.peekReaderTail()) |stack_trie| {
-                // Remove all stale stacktries from the symboltrie
-                try self.app.symbols.mapAtomic(stack_trie.*, .evict);
+                // We NEVER want to draw the intermediate state between evict and merge...
+                try self.app.symbols.lock();
+                defer self.app.symbols.unlock();
 
-                // Reset the stacktrie so it can be reused
-                stack_trie.reset(self.app.allocator);
-                self.app.context.ring.advanceReaderTail();
+                if (self.app.context.stacktries.peekReaderTail()) |stack_trie| {
+                    // Remove all stale stacktries from the symboltrie
+                    try self.app.symbols.mapUnsafe(stack_trie.*, .evict);
 
-                shouldRedraw = true;
-            }
+                    // Reset the stacktrie so it can be reused
+                    stack_trie.reset(self.app.allocator);
+                    self.app.context.stacktries.advanceReaderTail();
 
-            while (self.app.context.ring.peekReaderHead()) |stack_trie| {
-                // Merge in all the fresh stacktries
-                try self.app.symbols.mapAtomic(stack_trie.*, .merge);
+                    shouldRedraw = true;
+                }
 
-                self.app.context.ring.advanceReaderHead();
+                while (self.app.context.stacktries.peekReaderHead()) |stack_trie| {
+                    // Merge in all the fresh stacktries
+                    try self.app.symbols.mapUnsafe(stack_trie.*, .merge);
 
-                shouldRedraw = true;
-            }
+                    self.app.context.stacktries.advanceReaderHead();
 
-            if (shouldRedraw) {
-                if (self.app.interface.loop) |*loop| {
-                    loop.postEvent(.{ .redraw = {} });
+                    shouldRedraw = true;
+                }
+
+                if (shouldRedraw) {
+                    if (self.app.interface.loop) |*loop| {
+                        loop.postEvent(.{ .redraw = {} });
+                    }
                 }
             }
 
-            std.Thread.sleep(merge_interval);
+            const elapsed = timer.read();
+            if (elapsed < interval) {
+                std.Thread.sleep(interval - elapsed);
+            }
         }
     }
 };
@@ -564,17 +610,17 @@ pub const AggregateApp = struct {
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
 
-            while (self.app.context.ring.peekReaderTail()) |stack_trie| {
+            while (self.app.context.stacktries.peekReaderTail()) |stack_trie| {
                 // Remove all stale stacktries from the symboltrie
                 stack_trie.reset(self.app.allocator);
-                self.app.context.ring.advanceReaderTail();
+                self.app.context.stacktries.advanceReaderTail();
             }
 
-            while (self.app.context.ring.peekReaderHead()) |stack_trie| {
+            while (self.app.context.stacktries.peekReaderHead()) |stack_trie| {
                 // Merge in all the fresh stacktries
                 try self.app.symbols.mapAtomic(stack_trie.*, .merge);
 
-                self.app.context.ring.advanceReaderHead();
+                self.app.context.stacktries.advanceReaderHead();
 
                 shouldRedraw = true;
             }
@@ -594,6 +640,8 @@ pub const AggregateApp = struct {
 /// Fixed (--fixed)
 /// ===================================================================================================================
 /// Fixed duration measurement. Profile, then display the result. No streaming.
+/// TODO: Doing this required a bit of a hack with the ProfilerApp. Probably we want to move away from the current
+/// design where the context is generic as its kind of confusing. For now I don't care about this.
 pub const FixedApp = struct {
     allocator: std.mem.Allocator,
     context: *FixedContext,
@@ -627,8 +675,6 @@ pub const FixedApp = struct {
         } else {
             self.context.binDurationNanoseconds = std.math.maxInt(u64);
         }
-        self.context.currentBin = 0;
-        self.context.binStartNanoseconds = null;
 
         try self.app.profiler.start(self.allocator, rate);
         defer self.app.profiler.stop(self.allocator);

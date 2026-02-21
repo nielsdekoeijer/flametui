@@ -464,11 +464,12 @@ pub const Interface = struct {
         var lastMouseCol: ?i16 = null;
         var lastMouseRow: ?i16 = null;
         tui_loop: while (true) {
-            var event = self.loop.?.nextEvent();
+            var frame_timer = try std.time.Timer.start();
 
             var mouse: ?vaxis.Mouse = null;
 
-            event_loop: while (true) {
+            // Drains all events
+            event_loop: while (self.loop.?.tryEvent()) |event| {
                 // Handle events
                 switch (event) {
                     // Handle colors
@@ -636,16 +637,9 @@ pub const Interface = struct {
                         }
                     },
                 }
-
-                if (self.loop.?.tryEvent()) |next| {
-                    event = next;
-                } else {
-                    break :event_loop;
-                }
             }
 
-            {
-                if (!dirty) continue :tui_loop;
+            if (dirty) {
                 dirty = false;
 
                 self.infoSliceHitCount = null;
@@ -658,8 +652,19 @@ pub const Interface = struct {
 
                 const win = vx.window();
                 try self.draw(symbols.nodes.items, win, mouse);
+
                 try vx.render(ttyWriter);
             }
+
+            const elapsed = frame_timer.read();
+            const frame_ns: u64 = 16 * std.time.ns_per_ms;
+            if (elapsed < frame_ns) {
+                std.Thread.sleep(frame_ns - elapsed);
+            }
+            
+            std.log.info("{} Redrawing...", .{frame_timer.read()});
+
+            continue :tui_loop;
         }
     }
 

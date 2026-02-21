@@ -2,7 +2,6 @@ const std = @import("std");
 const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 
 /// Our hashing function
-/// TODO: use the StringHashMap instead?
 fn hash(str: []const u8) u64 {
     return std.hash.Wyhash.hash(0, str);
 }

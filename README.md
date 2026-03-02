@@ -30,13 +30,13 @@ zig build -Doptimize=ReleaseFast
 
 # Run the profiler (requires root/CAP_BPF privileges)
 # Sample at 49Hz for 1 second
-sudo zig-out/bin/flametui fixed --hz 49 --ms 1000
+sudo zig-out/bin/flametui fixed --attach perf=49 --ms 1000
 
 # Aggregate indefinitely — streams results to TUI, never evicts
-sudo zig-out/bin/flametui aggregate --hz 49
+sudo zig-out/bin/flametui aggregate --attach tracepoint=kmem:kmalloc
 
 # Sliding window — keeps the last N time slots, evicts oldest
-sudo zig-out/bin/flametui ring --hz 49 --ms 50 --n 10
+sudo zig-out/bin/flametui ring --attach kprobe=alloc_fd --ms 50 --n 10
 
 # Profile specific Process IDs (space separated string). These's pids are filtered inside of the eBPF program!
 sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)"

@@ -331,6 +331,10 @@ const Options = struct {
                 }
             }
 
+            if (opts.attachments.items.len == 0) {
+                try opts.attachments.appendSlice(allocator, DefaultAttachment);
+            }
+
             return .{ .general = general, .command = .{ .fixed = opts } };
         } else if (std.mem.eql(u8, cmd_str, "aggregate")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .aggregate = .{} }).aggregate) = .{};
@@ -344,6 +348,10 @@ const Options = struct {
                 } else {
                     exitWithUsage(writer, exe_name, "Unknown option for 'aggregate': {s}\n", .{arg});
                 }
+            }
+
+            if (opts.attachments.items.len == 0) {
+                try opts.attachments.appendSlice(allocator, DefaultAttachment);
             }
 
             return .{ .general = general, .command = .{ .aggregate = opts } };
@@ -366,6 +374,10 @@ const Options = struct {
                 } else {
                     exitWithUsage(writer, exe_name, "Unknown option for 'ring': {s}\n", .{arg});
                 }
+            }
+
+            if (opts.attachments.items.len == 0) {
+                try opts.attachments.appendSlice(allocator, DefaultAttachment);
             }
 
             return .{ .general = general, .command = .{ .ring = opts } };

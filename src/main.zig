@@ -69,10 +69,12 @@ const Options = struct {
         enable_idle: bool = false,
     };
 
+    pub const DefaultAttachment = &[_]flametui.Attachment{.{ .perf = .{ .hz = 99 } }};
+
     /// Commands with args
     const CommandOptions = union(enum) {
         fixed: struct {
-            hz: usize = 49,
+            attachments: std.ArrayListUnmanaged(flametui.Attachment) = .{},
             ms: u64 = 1000,
             pid: ?[]i32 = null,
             bins: usize = 1,
@@ -86,7 +88,7 @@ const Options = struct {
             }
         },
         aggregate: struct {
-            hz: usize = 49,
+            attachments: std.ArrayListUnmanaged(flametui.Attachment) = .{},
             pid: ?[]i32 = null,
 
             pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -94,11 +96,16 @@ const Options = struct {
                     allocator.free(pid);
                 }
 
+                for (self.attachments.items) |*attachment| {
+                    attachment.deinit(allocator);
+                }
+                self.attachments.deinit(allocator);
+
                 self.* = undefined;
             }
         },
         ring: struct {
-            hz: usize = 49,
+            attachments: std.ArrayListUnmanaged(flametui.Attachment) = .{},
             ms: u64 = 50,
             n: usize = 10,
             pid: ?[]i32 = null,
@@ -137,29 +144,33 @@ const Options = struct {
             \\  ring           Run profiling with a sliding window ring buffer
             \\  file           Load and visualize a collapsed stacktrace file
             \\
+            \\Attachment Options (for 'fixed', 'aggregate', and 'ring'):
+            \\  --attach [type]=[target]  Attach a probe. Can be specified multiple times.
+            \\                            Supported probe types:
+            \\                              perf=[hz]         (e.g., --attach perf=99)
+            \\                              kprobe=[name]     (e.g., --attach kprobe=vfs_read)
+            \\                              tracepoint=[name] (e.g., --attach tracepoint=sched:sched_switch)
+            \\
             \\Options (fixed): 
-            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
             \\  --ms   <int>    (optional) Profile duration in milliseconds (default: 1000)
             \\  --bins <int>    (optional) Number of bins to split into (default: 1)
-            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (aggregate):
-            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
-            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (ring):  
-            \\  --hz   <int>    (optional) Sampling frequency in Hertz (default: 49)
             \\  --ms   <int>    (optional) Size of ring slot in milliseconds (default: 50)
             \\  --n    <int>    (optional) Number of slots in ring buffer, minimum 4 (default: 10)
-            \\  --pid  <int>    (optional) Process id we want to view (default: -1, all processes)
+            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
             \\
-            \\Options (path):  
-            \\  --path <str>   (required) Path to the collapsed stack trace file
+            \\Options (file):  
+            \\  --path <str>    (required) Path to the collapsed stack trace file
             \\
             \\General:
-            \\  --verbose      (optional) Enable verbose logging
-            \\  --enable-idle  (optional) While measuring, include idle processes (i.e. pid 0)
-            \\  -h, --help     (optional) Print this help message
+            \\  --verbose       (optional) Enable verbose logging
+            \\  --enable-idle   (optional) Include idle processes (pid 0) in measurements
+            \\  -h, --help      (optional) Print this help message
             \\
             \\
         , .{exe_name});
@@ -242,6 +253,27 @@ const Options = struct {
         };
     }
 
+    fn parseAttachmentArgOrExit(
+        allocator: std.mem.Allocator,
+        args: *std.process.ArgIterator,
+        flag: []const u8,
+        writer: *std.Io.Writer,
+        exe_name: []const u8,
+    ) flametui.Attachment {
+        const val = args.next() orelse {
+            writer.print("Missing value for {s}\n", .{flag}) catch {};
+            Options.usage(exe_name, writer) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
+
+        return flametui.Attachment.parse(allocator, val) catch |err| {
+            writer.print("Invalid format for {s}: '{s}' ({})\n", .{ flag, val, err }) catch {};
+            writer.flush() catch {};
+            std.process.exit(1);
+        };
+    }
+
     pub fn parse(allocator: std.mem.Allocator, writer: *std.Io.Writer) !Options {
         var args = getArgumentsOrExit(writer);
         defer args.deinit();
@@ -284,8 +316,8 @@ const Options = struct {
         if (std.mem.eql(u8, cmd_str, "fixed")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .fixed = .{} }).fixed) = .{};
             while (args.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
+                if (std.mem.eql(u8, arg, "--attach")) {
+                    try opts.attachments.append(allocator, parseAttachmentArgOrExit(allocator, &args, arg, writer, exe_name));
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--bins")) {
@@ -298,12 +330,13 @@ const Options = struct {
                     exitWithUsage(writer, exe_name, "Unknown option for 'fixed': {s}\n", .{arg});
                 }
             }
+
             return .{ .general = general, .command = .{ .fixed = opts } };
         } else if (std.mem.eql(u8, cmd_str, "aggregate")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .aggregate = .{} }).aggregate) = .{};
             while (args.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
+                if (std.mem.eql(u8, arg, "--attach")) {
+                    try opts.attachments.append(allocator, parseAttachmentArgOrExit(allocator, &args, arg, writer, exe_name));
                 } else if (std.mem.eql(u8, arg, "--pid")) {
                     opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
@@ -312,12 +345,13 @@ const Options = struct {
                     exitWithUsage(writer, exe_name, "Unknown option for 'aggregate': {s}\n", .{arg});
                 }
             }
+
             return .{ .general = general, .command = .{ .aggregate = opts } };
         } else if (std.mem.eql(u8, cmd_str, "ring")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .ring = .{} }).ring) = .{};
             while (args.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--hz")) {
-                    opts.hz = parseIntArgOrExit(usize, &args, "--hz", writer, exe_name);
+                if (std.mem.eql(u8, arg, "--attach")) {
+                    try opts.attachments.append(allocator, parseAttachmentArgOrExit(allocator, &args, arg, writer, exe_name));
                 } else if (std.mem.eql(u8, arg, "--ms")) {
                     opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
@@ -333,6 +367,7 @@ const Options = struct {
                     exitWithUsage(writer, exe_name, "Unknown option for 'ring': {s}\n", .{arg});
                 }
             }
+
             return .{ .general = general, .command = .{ .ring = opts } };
         } else if (std.mem.eql(u8, cmd_str, "file")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .file = .{} }).file) = .{};
@@ -404,7 +439,7 @@ pub fn main() !void {
 
     std.log.info("Running in mode '{s}'", .{@tagName(opts.command)});
     switch (opts.command) {
-        .fixed => |command| {
+        .fixed => |*command| {
             requireRoot(writer, "flametui");
 
             var app = try flametui.FixedApp.init(allocator, command.bins);
@@ -412,9 +447,15 @@ pub fn main() !void {
 
             configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            try app.run(command.hz, command.ms * std.time.ns_per_ms);
+            const attachments = try command.attachments.toOwnedSlice(allocator);
+            defer {
+                for (attachments) |*a| a.deinit(allocator);
+                allocator.free(attachments);
+            }
+
+            try app.run(attachments, command.ms * std.time.ns_per_ms);
         },
-        .aggregate => |command| {
+        .aggregate => |*command| {
             requireRoot(writer, "flametui");
 
             var app = try flametui.AggregateApp.init(allocator);
@@ -422,9 +463,15 @@ pub fn main() !void {
 
             configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            try app.run(command.hz);
+            const attachments = try command.attachments.toOwnedSlice(allocator);
+            defer {
+                for (attachments) |*a| a.deinit(allocator);
+                allocator.free(attachments);
+            }
+
+            try app.run(attachments);
         },
-        .ring => |command| {
+        .ring => |*command| {
             requireRoot(writer, "flametui");
 
             var app = try flametui.RingApp.init(allocator, command.n);
@@ -432,7 +479,13 @@ pub fn main() !void {
 
             configureProfiler(app.app.profiler, opts.general, command.pid);
 
-            try app.run(command.hz, command.ms * std.time.ns_per_ms);
+            const attachments = try command.attachments.toOwnedSlice(allocator);
+            defer {
+                for (attachments) |*a| a.deinit(allocator);
+                allocator.free(attachments);
+            }
+
+            try app.run(attachments, command.ms * std.time.ns_per_ms);
         },
         .file => |file| {
             const path = file.file_path orelse unreachable;

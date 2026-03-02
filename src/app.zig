@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const c = @import("cimport.zig").c;
 const bpf = @import("bpf.zig");
 
+const Attachment = @import("profile.zig").Attachment;
 const InstructionPointer = @import("profile.zig").InstructionPointer;
 const PID = @import("profile.zig").PID;
 const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
@@ -440,12 +441,12 @@ pub fn ProfilerApp(ContextType: type) type {
         }
 
         /// Start running the application
-        fn start(self: *@This(), rate: usize) !void {
+        fn start(self: *@This(), attachments: []Attachment) !void {
             self.shouldQuit.store(false, .release);
             errdefer self.stop();
 
             if (self.bpfThread != null) return error.ThreadAlreadyRunning;
-            self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, rate });
+            self.bpfThread = try std.Thread.spawn(.{}, bpfWorker, .{ self, attachments });
 
             if (self.tuiThread != null) return error.ThreadAlreadyRunning;
             self.tuiThread = try std.Thread.spawn(.{}, tuiWorker, .{self});
@@ -463,12 +464,12 @@ pub fn ProfilerApp(ContextType: type) type {
         }
 
         /// Worker thread, draining bpf events
-        fn bpfWorker(self: *@This(), rate: usize) void {
-            self.profiler.start(self.allocator, rate) catch {
+        fn bpfWorker(self: *@This(), attachments: []Attachment) void {
+            self.profiler.start(self.allocator, attachments) catch {
                 @panic("Could not start profiler");
             };
 
-            const interval = std.time.ns_per_s / rate;
+            const interval = 50 * std.time.ms_per_s;
             while (!self.shouldQuit.load(.acquire)) {
                 var timer = std.time.Timer.start() catch unreachable;
 
@@ -525,10 +526,10 @@ pub const RingApp = struct {
         self.allocator.destroy(self.context);
     }
 
-    pub fn run(self: *RingApp, rate: usize, slotNanoseconds: u64) !void {
+    pub fn run(self: *RingApp, attachments: []Attachment, slotNanoseconds: u64) !void {
         self.app.context.binDurationNanoseconds = slotNanoseconds;
 
-        try self.app.start(rate);
+        try self.app.start(attachments);
 
         const interval = slotNanoseconds;
         while (!self.app.shouldQuit.load(.acquire)) {
@@ -603,9 +604,9 @@ pub const AggregateApp = struct {
         self.allocator.destroy(self.context);
     }
 
-    pub fn run(self: *AggregateApp, rate: usize) !void {
+    pub fn run(self: *AggregateApp, attachments: []Attachment) !void {
         self.app.context.binDurationNanoseconds = 50 * std.time.ns_per_ms;
-        try self.app.start(rate);
+        try self.app.start(attachments);
 
         while (!self.app.shouldQuit.load(.acquire)) {
             var shouldRedraw = false;
@@ -667,7 +668,7 @@ pub const FixedApp = struct {
         self.allocator.destroy(self.context);
     }
 
-    pub fn run(self: *FixedApp, rate: usize, timeout_ns: u64) !void {
+    pub fn run(self: *FixedApp, attachments: []Attachment, timeout_ns: u64) !void {
         const binCount = self.context.stacktries.len;
 
         if (binCount > 1) {
@@ -676,7 +677,7 @@ pub const FixedApp = struct {
             self.context.binDurationNanoseconds = std.math.maxInt(u64);
         }
 
-        try self.app.profiler.start(self.allocator, rate);
+        try self.app.profiler.start(self.allocator, attachments);
         defer self.app.profiler.stop(self.allocator);
 
         var timer = try std.time.Timer.start();

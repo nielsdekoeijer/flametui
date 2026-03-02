@@ -107,7 +107,86 @@ pub const EventType = struct {
 };
 
 /// Name of the function in our bpf program
-const ProfileFunctionName = "do_sample";
+const ProfileFunctionNamePerf = "sample_perf";
+const ProfileFunctionNameKProbe = "sample_kprobe";
+const ProfileFunctionNameTracePoint = "sample_tracepoint";
+
+// --------------------------------------------------------------------------------------------------------------------
+// Libbpf attachment types
+// --------------------------------------------------------------------------------------------------------------------
+pub const Attachment = union(enum) {
+    perf: struct {
+        hz: usize = 49,
+
+        pub fn parse(subcommand: []const u8) !@This() {
+            return @This(){
+                .hz = try std.fmt.parseInt(usize, subcommand, 10),
+            };
+        }
+    },
+    kprobe: struct {
+        name: [:0]const u8,
+
+        pub fn parse(allocator: std.mem.Allocator, subcommand: []const u8) !@This() {
+            return @This(){
+                .name = try allocator.dupeZ(u8, subcommand),
+            };
+        }
+    },
+    tracepoint: struct {
+        name: [:0]const u8,
+        category: [:0]const u8,
+
+        pub fn parse(allocator: std.mem.Allocator, subcommand: []const u8) !@This() {
+            var tokens = std.mem.tokenizeScalar(u8, subcommand, ':');
+            return @This(){
+                .category = try allocator.dupeZ(u8, tokens.next() orelse return error.ParseError),
+                .name = try allocator.dupeZ(u8, tokens.next() orelse return error.ParseError),
+            };
+        }
+    },
+
+    pub fn parse(allocator: std.mem.Allocator, command: []const u8) !Attachment {
+        var commandTokenized = std.mem.tokenizeScalar(u8, command, '=');
+        const subcommand = commandTokenized.next() orelse return error.ParseError;
+        const argument = commandTokenized.next() orelse return error.ParseError;
+
+        if (std.mem.eql(u8, subcommand, "perf")) {
+            return .{
+                .perf = try .parse(argument),
+            };
+        }
+
+        if (std.mem.eql(u8, subcommand, "kprobe")) {
+            return .{
+                .kprobe = try .parse(allocator, argument),
+            };
+        }
+
+        if (std.mem.eql(u8, subcommand, "tracepoint")) {
+            return .{
+                .tracepoint = try .parse(allocator, argument),
+            };
+        }
+
+        return error.ParseError;
+    }
+
+    pub fn deinit(self: *Attachment, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            inline .kprobe => |s| {
+                allocator.free(s.name);
+            },
+            inline .tracepoint => |s| {
+                allocator.free(s.name);
+                allocator.free(s.category);
+            },
+            else => return,
+        }
+
+        self.* = undefined;
+    }
+};
 
 /// ===================================================================================================================
 /// Wrappers
@@ -175,57 +254,61 @@ pub const ProfilerUnmanaged = struct {
         allocator.free(self.bytecode);
     }
 
-    /// Opens perf events, and attaches them. We store the links in order to keep them alive. Freeing them closes
+    /// Opens events and attaches them. We store the links in order to keep them alive. Freeing them closes
     /// the connection.
-    pub fn start(self: *ProfilerUnmanaged, allocator: std.mem.Allocator, rate: usize) !void {
+    pub fn start(self: *ProfilerUnmanaged, allocator: std.mem.Allocator, attachments: []const Attachment) !void {
         if (self.links) |_| {
             return error.ProfilerUnmanagedStartingWhileStarted;
         }
 
-        const pid = -1;
+        // Use a dynamic list to gather all links safely
+        var link_list: std.ArrayListUnmanaged(bpf.Object.Link) = .{};
 
-        // Create links
-        const cpuCount = try std.Thread.getCpuCount();
-        const links = try allocator.alloc(bpf.Object.Link, cpuCount);
-        errdefer allocator.free(links);
-
-        // Open perf events
-        std.log.info("Starting perf event with rate {} and pid {}", .{ rate, pid });
-        var attributes = std.os.linux.perf_event_attr{
-            .type = .SOFTWARE,
-            .sample_period_or_freq = rate,
-            .config = c.PERF_COUNT_SW_CPU_CLOCK,
-            .flags = .{
-                .freq = true,
-                .mmap = true,
-            },
-        };
-
-        const program = try self.object.findProgram(ProfileFunctionName);
-
-        // Attach programs to each cpu
-        for (0..links.len) |i| {
-            errdefer {
-                for (0..i) |j| links[j].deinit();
-            }
-
-            const fd = blk: {
-                const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, @intCast(pid), @intCast(i), -1, 0));
-
-                if (pfd == -1) {
-                    return error.PerfEventOpenFailure;
-                }
-
-                break :blk @as(i32, @intCast(pfd));
-            };
-            errdefer {
-                std.posix.close(fd);
-            }
-
-            links[i] = try program.attachPerfEvent(fd);
+        // If anything fails midway, destroy all previously successful attachments
+        errdefer {
+            for (link_list.items) |*l| l.deinit();
+            link_list.deinit(allocator);
         }
 
-        self.links = links;
+        for (attachments) |attachment| {
+            switch (attachment) {
+                .perf => |config| {
+                    const cpuCount = try std.Thread.getCpuCount();
+                    std.log.info("Attaching perf_event at {} Hz across {} CPUs", .{ config.hz, cpuCount });
+
+                    var attributes = std.os.linux.perf_event_attr{
+                        .type = .SOFTWARE,
+                        .sample_period_or_freq = config.hz,
+                        .config = c.PERF_COUNT_SW_CPU_CLOCK,
+                        .flags = .{ .freq = true, .mmap = true },
+                    };
+
+                    const program = try self.object.findProgram("sample_perf");
+
+                    for (0..cpuCount) |i| {
+                        const pfd: i64 = @bitCast(std.os.linux.perf_event_open(&attributes, -1, @intCast(i), -1, 0));
+                        if (pfd == -1) return error.PerfEventOpenFailure;
+
+                        const fd = @as(i32, @intCast(pfd));
+                        errdefer std.posix.close(fd);
+
+                        try link_list.append(allocator, try program.attachPerfEvent(fd));
+                    }
+                },
+                .kprobe => |config| {
+                    std.log.info("Attaching kprobe to '{s}'", .{config.name});
+                    const program = try self.object.findProgram("sample_kprobe");
+                    try link_list.append(allocator, try program.attachKProbe(false, config.name));
+                },
+                .tracepoint => |config| {
+                    std.log.info("Attaching tracepoint to '{s}:{s}'", .{ config.category, config.name });
+                    const program = try self.object.findProgram("sample_tracepoint");
+                    try link_list.append(allocator, try program.attachTracepoint(config.category, config.name));
+                },
+            }
+        }
+
+        self.links = try link_list.toOwnedSlice(allocator);
     }
 
     /// Stop running by detaching the link

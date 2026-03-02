@@ -134,6 +134,20 @@ pub const Object = struct {
             const link = c.bpf_program__attach_perf_event(self.program, fd) orelse return error.AttachFailure;
             return .{ .link = link };
         }
+
+        /// Attachment with tracepoint
+        /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
+        pub fn attachTracepoint(self: Program, category: [:0]const u8, name: [:0]const u8) error{AttachFailure}!Link {
+            const link = c.bpf_program__attach_tracepoint(self.program, category, name) orelse return error.AttachFailure;
+            return .{ .link = link };
+        }
+
+        /// Attachment with kprobe
+        /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
+        pub fn attachKProbe(self: Program, retprobe: bool, name: [:0]const u8) error{AttachFailure}!Link {
+            const link = c.bpf_program__attach_kprobe(self.program, retprobe, name) orelse return error.AttachFailure;
+            return .{ .link = link };
+        }
     };
 
     /// View over a link to a program

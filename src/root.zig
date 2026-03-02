@@ -3,6 +3,7 @@ pub const AggregateApp = @import("app.zig").AggregateApp;
 pub const FixedApp = @import("app.zig").FixedApp;
 pub const FileApp = @import("app.zig").FileApp;
 pub const StdinApp = @import("app.zig").StdinApp;
+pub const Attachment = @import("profile.zig").Attachment;
 
 test {
     const std = @import("std");

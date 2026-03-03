@@ -1,4 +1,5 @@
 pub const RingApp = @import("app.zig").RingApp;
+pub const TriggerApp = @import("app.zig").TriggerApp;
 pub const AggregateApp = @import("app.zig").AggregateApp;
 pub const FixedApp = @import("app.zig").FixedApp;
 pub const FileApp = @import("app.zig").FileApp;

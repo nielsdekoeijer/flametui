@@ -118,6 +118,21 @@ const Options = struct {
                 self.* = undefined;
             }
         },
+        trigger: struct {
+            attachments: std.ArrayListUnmanaged(flametui.Attachment) = .{},
+            trigger: ?flametui.Attachment = null,
+            ms: u64 = 50,
+            n: usize = 10,
+            pid: ?[]i32 = null,
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                if (self.pid) |pid| {
+                    allocator.free(pid);
+                }
+
+                self.* = undefined;
+            }
+        },
         file: struct {
             file_path: ?[]const u8 = null,
 
@@ -144,7 +159,7 @@ const Options = struct {
             \\  ring           Run profiling with a sliding window ring buffer
             \\  file           Load and visualize a collapsed stacktrace file
             \\
-            \\Attachment Options (for 'fixed', 'aggregate', and 'ring'):
+            \\Attachment Options (for 'fixed', 'aggregate', 'trigger', and 'ring'):
             \\  --attach [type]=[target]  Attach a probe. Can be specified multiple times.
             \\                            Supported probe types:
             \\                              perf=[hz]         (e.g., --attach perf=99)
@@ -152,20 +167,26 @@ const Options = struct {
             \\                              tracepoint=[name] (e.g., --attach tracepoint=sched:sched_switch)
             \\
             \\Options (fixed): 
-            \\  --ms   <int>    (optional) Profile duration in milliseconds (default: 1000)
-            \\  --bins <int>    (optional) Number of bins to split into (default: 1)
-            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
+            \\  --ms      <int>  (optional) Profile duration in milliseconds (default: 1000)
+            \\  --bins    <int>  (optional) Number of bins to split into (default: 1)
+            \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (aggregate):
-            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
+            \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
             \\
-            \\Options (ring):  
-            \\  --ms   <int>    (optional) Size of ring slot in milliseconds (default: 50)
-            \\  --n    <int>    (optional) Number of slots in ring buffer, minimum 4 (default: 10)
-            \\  --pid  <int>    (optional) Process IDs to filter by, space separated (default: all)
+            \\Options (ring):
+            \\  --ms      <int>  (optional) Size of ring slot in milliseconds (default: 50)
+            \\  --n       <int>  (optional) Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
+            \\
+            \\Options (trigger):
+            \\  --trigger <att>  (required) Attachment
+            \\  --ms      <int>  (optional) Size of ring slot in milliseconds (default: 50)
+            \\  --n       <int>  (optional) Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (file):  
-            \\  --path <str>    (required) Path to the collapsed stack trace file
+            \\  --path    <str>  (required) Path to the collapsed stack trace file
             \\
             \\General:
             \\  --verbose       (optional) Enable verbose logging
@@ -381,6 +402,38 @@ const Options = struct {
             }
 
             return .{ .general = general, .command = .{ .ring = opts } };
+        } else if (std.mem.eql(u8, cmd_str, "trigger")) {
+            var opts: @TypeOf(@as(CommandOptions, .{ .trigger = .{} }).trigger) = .{};
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--attach")) {
+                    try opts.attachments.append(allocator, parseAttachmentArgOrExit(allocator, &args, arg, writer, exe_name));
+                } else if (std.mem.eql(u8, arg, "--trigger")) {
+                    opts.trigger = parseAttachmentArgOrExit(allocator, &args, arg, writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--ms")) {
+                    opts.ms = parseIntArgOrExit(u64, &args, "--ms", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--pid")) {
+                    opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--n")) {
+                    opts.n = parseIntArgOrExit(usize, &args, "--n", writer, exe_name);
+                    if (opts.n < 4) {
+                        exitWithUsage(writer, exe_name, "Ring buffer requires at least 4 slots, got {}\n", .{opts.n});
+                    }
+                } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
+                    // handled
+                } else {
+                    exitWithUsage(writer, exe_name, "Unknown option for 'trigger': {s}\n", .{arg});
+                }
+            }
+
+            if (opts.attachments.items.len == 0) {
+                try opts.attachments.appendSlice(allocator, DefaultAttachment);
+            }
+
+            if (opts.trigger == null) {
+                exitWithUsage(writer, exe_name, "Missing trigger for 'trigger' command\n", .{});
+            }
+
+            return .{ .general = general, .command = .{ .trigger = opts } };
         } else if (std.mem.eql(u8, cmd_str, "file")) {
             var opts: @TypeOf(@as(CommandOptions, .{ .file = .{} }).file) = .{};
             while (args.next()) |arg| {
@@ -396,9 +449,11 @@ const Options = struct {
                     exitWithUsage(writer, exe_name, "Unknown option for 'file': {s}\n", .{arg});
                 }
             }
+
             if (opts.file_path == null) {
                 exitWithUsage(writer, exe_name, "Missing file path for 'file' command\n", .{});
             }
+
             return .{ .general = general, .command = .{ .file = opts } };
         } else {
             exitWithUsage(writer, exe_name, "Unknown command: {s}\n", .{cmd_str});
@@ -498,6 +553,22 @@ pub fn main() !void {
             }
 
             try app.run(attachments, command.ms * std.time.ns_per_ms);
+        },
+        .trigger => |*command| {
+            requireRoot(writer, "flametui");
+
+            var app = try flametui.TriggerApp.init(allocator, command.n);
+            defer app.deinit();
+
+            configureProfiler(&app.app.profiler, opts.general, command.pid);
+
+            const attachments = try command.attachments.toOwnedSlice(allocator);
+            defer {
+                for (attachments) |*a| a.deinit(allocator);
+                allocator.free(attachments);
+            }
+
+            try app.run(command.trigger.?, attachments, command.ms * std.time.ns_per_ms);
         },
         .file => |file| {
             const path = file.file_path orelse unreachable;

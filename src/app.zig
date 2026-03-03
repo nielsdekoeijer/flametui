@@ -409,7 +409,7 @@ pub fn ProfilerApp(ContextType: type) type {
 
             // init tui with the symbols
             var interface = try Interface.init(allocator, symbols);
-            interface.missed = &profiler.globals.map.dropped_events; 
+            interface.missed = &profiler.globals.map.dropped_events;
             errdefer interface.deinit();
 
             return .{
@@ -527,6 +527,85 @@ pub const RingApp = struct {
     }
 
     pub fn run(self: *RingApp, attachments: []Attachment, slotNanoseconds: u64) !void {
+        self.app.context.binDurationNanoseconds = slotNanoseconds;
+
+        try self.app.start(attachments);
+
+        const interval = slotNanoseconds;
+        while (!self.app.shouldQuit.load(.acquire)) {
+            var timer = try std.time.Timer.start();
+            {
+                var shouldRedraw = false;
+
+                // We NEVER want to draw the intermediate state between evict and merge...
+                try self.app.symbols.lock();
+                defer self.app.symbols.unlock();
+
+                if (self.app.context.stacktries.peekReaderTail()) |stack_trie| {
+                    // Remove all stale stacktries from the symboltrie
+                    try self.app.symbols.mapUnsafe(stack_trie.*, .evict);
+
+                    // Reset the stacktrie so it can be reused
+                    stack_trie.reset(self.app.allocator);
+                    self.app.context.stacktries.advanceReaderTail();
+
+                    shouldRedraw = true;
+                }
+
+                while (self.app.context.stacktries.peekReaderHead()) |stack_trie| {
+                    // Merge in all the fresh stacktries
+                    try self.app.symbols.mapUnsafe(stack_trie.*, .merge);
+
+                    self.app.context.stacktries.advanceReaderHead();
+
+                    shouldRedraw = true;
+                }
+
+                if (shouldRedraw) {
+                    if (self.app.interface.loop) |*loop| {
+                        loop.postEvent(.{ .redraw = {} });
+                    }
+                }
+            }
+
+            const elapsed = timer.read();
+            if (elapsed < interval) {
+                std.Thread.sleep(interval - elapsed);
+            }
+        }
+    }
+};
+
+/// ===================================================================================================================
+/// Trigger (--trigger)
+/// ===================================================================================================================
+/// Sliding window. Streams results to TUI, evicts oldest slot when ring is full.
+pub const TriggerApp = struct {
+    allocator: std.mem.Allocator,
+    context: *RingProfilerContext,
+    app: ProfilerApp(RingProfilerContext),
+
+    pub fn init(allocator: std.mem.Allocator, binsStackTrie: usize) !TriggerApp {
+        const context = try allocator.create(RingProfilerContext);
+        errdefer allocator.destroy(context);
+        context.* = try RingProfilerContext.init(allocator, binsStackTrie);
+        errdefer context.deinit();
+
+        return .{
+            .allocator = allocator,
+            .context = context,
+            .app = try ProfilerApp(RingProfilerContext).init(allocator, context, 1),
+        };
+    }
+
+    pub fn deinit(self: *TriggerApp) void {
+        self.app.deinit();
+        self.context.deinit();
+        self.allocator.destroy(self.context);
+    }
+
+    pub fn run(self: *TriggerApp, trigger: Attachment, attachments: []Attachment, slotNanoseconds: u64) !void {
+        _ = trigger;
         self.app.context.binDurationNanoseconds = slotNanoseconds;
 
         try self.app.start(attachments);

@@ -1105,7 +1105,10 @@ pub const Interface = struct {
 
             // early stop
             const childWidthPixels = childWidth * @as(f32, @floatFromInt(context.widthCells));
-            if (childWidthPixels < 1.0) continue;
+            if (childWidthPixels < 1.0) {
+                childOffset += childWidth;
+                continue;
+            }
 
             try self.handleMouse(nodes, id, mouse, .{
                 .currentX = context.currentX,
@@ -1225,7 +1228,10 @@ pub const Interface = struct {
 
             // early stop
             const childWidthPixels = childWidth * @as(f32, @floatFromInt(context.widthCells));
-            if (childWidthPixels < 1.0) continue;
+            if (childWidthPixels < 1.0) {
+                childOffset += childWidth;
+                continue;
+            }
 
             try self.drawSymbol(nodes, id, win, .{
                 .currentX = context.currentX,

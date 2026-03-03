@@ -7,4 +7,5 @@ struct globals_t {
     __u64 enable_idle; 
     __u64 pids[32];
     __u64 pids_len;
+    __u64 trigger_attachment_found;
 };

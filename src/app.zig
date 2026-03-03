@@ -678,7 +678,6 @@ pub const FixedApp = struct {
         }
 
         try self.app.profiler.start(self.allocator, attachments);
-        defer self.app.profiler.stop(self.allocator);
 
         var timer = try std.time.Timer.start();
         while (timer.read() < timeout_ns) {
@@ -687,6 +686,9 @@ pub const FixedApp = struct {
                 try self.app.profiler.ring.poll(10);
             }
         }
+
+        self.app.profiler.stop(self.allocator);
+        while ((try self.app.profiler.ring.consume()) != 0) {}
 
         {
             const list = self.app.symbols.list.lock();

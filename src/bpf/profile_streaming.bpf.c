@@ -17,7 +17,7 @@ struct {
   __uint(map_flags, BPF_F_MMAPABLE);
 } globals_map SEC(".maps");
 
-static __always_inline struct globals_t *get_globals() {
+static __always_inline struct globals_t *get_globals_map() {
   __u32 key = 0;
   return bpf_map_lookup_elem(&globals_map, &key);
 }
@@ -49,7 +49,7 @@ static __always_inline int process_event(void *ctx) {
   __u64 pid = tgid >> 32;
 
   // get globals
-  struct globals_t *globals = get_globals();
+  struct globals_t *globals = get_globals_map();
   if (!globals) {
     return 0;
   }
@@ -221,4 +221,44 @@ int sample_kretprobe(struct pt_regs *ctx) {
 SEC("tracepoint")
 int sample_tracepoint(void *ctx) { 
     return process_event(ctx); 
+}
+
+static __always_inline int check_trigger(void *ctx) {
+  // grab timestamp
+  __u64 timestamp = bpf_ktime_get_ns();
+
+  // get globals
+  struct globals_t *globals = get_globals_map();
+  if (!globals) {
+    return 0;
+  }
+
+  __sync_fetch_and_add(&globals->trigger_attachment_found, timestamp);
+
+  return 0;
+}
+
+SEC("uprobe")
+int trigger_uprobe(struct pt_regs *ctx) { 
+    return check_trigger(ctx); 
+}
+
+SEC("uretprobe")
+int trigger_uretprobe(struct pt_regs *ctx) { 
+    return check_trigger(ctx); 
+}
+
+SEC("kprobe")
+int trigger_kprobe(struct pt_regs *ctx) { 
+    return check_trigger(ctx); 
+}
+
+SEC("kretprobe")
+int trigger_kretprobe(struct pt_regs *ctx) { 
+    return check_trigger(ctx); 
+}
+
+SEC("tracepoint")
+int trigger_tracepoint(void *ctx) { 
+    return check_trigger(ctx); 
 }

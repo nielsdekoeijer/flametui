@@ -409,7 +409,7 @@ pub fn ProfilerApp(ContextType: type) type {
 
             // init tui with the symbols
             var interface = try Interface.init(allocator, symbols);
-            interface.missed = &profiler.globals.map.dropped_events;
+            interface.missed = &profiler.globals.map.dropped_events; 
             errdefer interface.deinit();
 
             return .{

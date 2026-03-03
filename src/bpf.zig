@@ -103,6 +103,16 @@ pub const Object = struct {
                 };
             }
 
+            pub fn readAtomic(self: @This(), comptime field_name: []const u8) @FieldType(T, field_name) {
+                const ptr = &@field(self.map.*, field_name);
+                return @atomicLoad(@FieldType(T, field_name), ptr, .acquire);
+            }
+
+            pub fn writeAtomic(self: *@This(), comptime field_name: []const u8, value: @FieldType(T, field_name)) void {
+                const ptr = &@field(self.map.*, field_name);
+                @atomicStore(@FieldType(T, field_name), ptr, value, .release);
+            }
+
             pub fn deinit(self: *@This()) void {
                 const bytes = @as([]align(std.heap.page_size_min) const u8, @ptrCast(@volatileCast(self.map)));
                 std.posix.munmap(bytes);

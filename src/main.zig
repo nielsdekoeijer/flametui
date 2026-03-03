@@ -457,7 +457,7 @@ pub fn main() !void {
             var app = try flametui.FixedApp.init(allocator, command.bins);
             defer app.deinit();
 
-            configureProfiler(app.app.profiler, opts.general, command.pid);
+            configureProfiler(&app.app.profiler, opts.general, command.pid);
 
             const attachments = try command.attachments.toOwnedSlice(allocator);
             defer {
@@ -473,7 +473,7 @@ pub fn main() !void {
             var app = try flametui.AggregateApp.init(allocator);
             defer app.deinit();
 
-            configureProfiler(app.app.profiler, opts.general, command.pid);
+            configureProfiler(&app.app.profiler, opts.general, command.pid);
 
             const attachments = try command.attachments.toOwnedSlice(allocator);
             defer {
@@ -489,7 +489,7 @@ pub fn main() !void {
             var app = try flametui.RingApp.init(allocator, command.n);
             defer app.deinit();
 
-            configureProfiler(app.app.profiler, opts.general, command.pid);
+            configureProfiler(&app.app.profiler, opts.general, command.pid);
 
             const attachments = try command.attachments.toOwnedSlice(allocator);
             defer {

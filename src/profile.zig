@@ -110,6 +110,9 @@ pub const EventType = struct {
 const ProfileFunctionNamePerf = "sample_perf";
 const ProfileFunctionNameKProbe = "sample_kprobe";
 const ProfileFunctionNameTracePoint = "sample_tracepoint";
+const TriggerFunctionNamePerf = "trigger_perf";
+const TriggerFunctionNameKProbe = "trigger_kprobe";
+const TriggerFunctionNameTracePoint = "trigger_tracepoint";
 
 // --------------------------------------------------------------------------------------------------------------------
 // Libbpf attachment types

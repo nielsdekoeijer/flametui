@@ -199,29 +199,19 @@ SEC("perf_event")
 int sample_perf(struct bpf_perf_event_data *ctx) { return process_event(ctx); }
 
 SEC("uprobe")
-int sample_uprobe(struct pt_regs *ctx) { 
-    return process_event(ctx); 
-}
+int sample_uprobe(struct pt_regs *ctx) { return process_event(ctx); }
 
 SEC("uretprobe")
-int sample_uretprobe(struct pt_regs *ctx) { 
-    return process_event(ctx); 
-}
+int sample_uretprobe(struct pt_regs *ctx) { return process_event(ctx); }
 
 SEC("kprobe")
-int sample_kprobe(struct pt_regs *ctx) { 
-    return process_event(ctx); 
-}
+int sample_kprobe(struct pt_regs *ctx) { return process_event(ctx); }
 
 SEC("kretprobe")
-int sample_kretprobe(struct pt_regs *ctx) { 
-    return process_event(ctx); 
-}
+int sample_kretprobe(struct pt_regs *ctx) { return process_event(ctx); }
 
 SEC("tracepoint")
-int sample_tracepoint(void *ctx) { 
-    return process_event(ctx); 
-}
+int sample_tracepoint(void *ctx) { return process_event(ctx); }
 
 static __always_inline int check_trigger(void *ctx) {
   // grab timestamp
@@ -238,27 +228,20 @@ static __always_inline int check_trigger(void *ctx) {
   return 0;
 }
 
+SEC("perf_event")
+int trigger_perf(struct bpf_perf_event_data *ctx) { return check_trigger(ctx); }
+
 SEC("uprobe")
-int trigger_uprobe(struct pt_regs *ctx) { 
-    return check_trigger(ctx); 
-}
+int trigger_uprobe(struct pt_regs *ctx) { return check_trigger(ctx); }
 
 SEC("uretprobe")
-int trigger_uretprobe(struct pt_regs *ctx) { 
-    return check_trigger(ctx); 
-}
+int trigger_uretprobe(struct pt_regs *ctx) { return check_trigger(ctx); }
 
 SEC("kprobe")
-int trigger_kprobe(struct pt_regs *ctx) { 
-    return check_trigger(ctx); 
-}
+int trigger_kprobe(struct pt_regs *ctx) { return check_trigger(ctx); }
 
 SEC("kretprobe")
-int trigger_kretprobe(struct pt_regs *ctx) { 
-    return check_trigger(ctx); 
-}
+int trigger_kretprobe(struct pt_regs *ctx) { return check_trigger(ctx); }
 
 SEC("tracepoint")
-int trigger_tracepoint(void *ctx) { 
-    return check_trigger(ctx); 
-}
+int trigger_tracepoint(void *ctx) { return check_trigger(ctx); }

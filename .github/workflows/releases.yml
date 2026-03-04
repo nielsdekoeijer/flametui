@@ -3,8 +3,8 @@ name: Release Builder
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*" 
+    branches:
+      - main 
 
 permissions:
   contents: write
@@ -24,6 +24,10 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Get Short SHA
+        id: slug
+        run: echo "sha8=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_OUTPUT
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -46,7 +50,8 @@ jobs:
           tar -czvf ${{ matrix.archive_name }}.tar.gz ${{ matrix.archive_name }} README.md
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2 
         with:
+          tag_name: rev-${{ steps.slug.outputs.sha8 }}
+          name: ${{ steps.slug.outputs.sha8 }}
           files: release/${{ matrix.archive_name }}.tar.gz

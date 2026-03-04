@@ -136,6 +136,18 @@ pub const Attachment = union(enum) {
             };
         }
     },
+    uprobe: struct {
+        binary: [:0]const u8,
+        symbol: [:0]const u8,
+
+        pub fn parse(allocator: std.mem.Allocator, subcommand: []const u8) !@This() {
+            var tokens = std.mem.tokenizeScalar(u8, subcommand, ':');
+            return @This(){
+                .binary = try allocator.dupeZ(u8, tokens.next() orelse return error.ParseError),
+                .symbol = try allocator.dupeZ(u8, tokens.next() orelse return error.ParseError),
+            };
+        }
+    },
     tracepoint: struct {
         name: [:0]const u8,
         category: [:0]const u8,
@@ -166,6 +178,12 @@ pub const Attachment = union(enum) {
             };
         }
 
+        if (std.mem.eql(u8, subcommand, "uprobe")) {
+            return .{
+                .uprobe = try .parse(allocator, argument),
+            };
+        }
+
         if (std.mem.eql(u8, subcommand, "tracepoint")) {
             return .{
                 .tracepoint = try .parse(allocator, argument),
@@ -179,6 +197,10 @@ pub const Attachment = union(enum) {
         switch (self.*) {
             inline .kprobe => |s| {
                 allocator.free(s.name);
+            },
+            inline .uprobe => |s| {
+                allocator.free(s.binary);
+                allocator.free(s.symbol);
             },
             inline .tracepoint => |s| {
                 allocator.free(s.name);
@@ -302,6 +324,11 @@ pub const ProfilerUnmanaged = struct {
                     std.log.info("Attaching kprobe to '{s}'", .{config.name});
                     const program = try self.object.findProgram("sample_kprobe");
                     try link_list.append(allocator, try program.attachKProbe(false, config.name));
+                },
+                .uprobe => |config| {
+                    std.log.info("Attaching uprobe to '{s}' in '{s}'", .{ config.symbol, config.binary });
+                    const program = try self.object.findProgram("sample_uprobe");
+                    try link_list.append(allocator, try program.attachUProbe(false, config.binary, config.symbol));
                 },
                 .tracepoint => |config| {
                     std.log.info("Attaching tracepoint to '{s}:{s}'", .{ config.category, config.name });

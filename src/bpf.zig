@@ -161,11 +161,11 @@ pub const Object = struct {
 
         /// Attachment with uprobe
         /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
-        pub fn attachUProbe(self: Program, retprobe: bool, binary: [:0]const u8, program: [:0]const u8) error{AttachFailure}!Link {
+        pub fn attachUProbe(self: Program, retprobe: bool, binary: [:0]const u8, symbol: [:0]const u8) error{AttachFailure}!Link {
             const link = c.attach_uprobe_helper(
                 self.program,
                 binary.ptr,
-                program.ptr,
+                symbol.ptr,
                 retprobe,
             ) orelse return error.AttachFailure;
 

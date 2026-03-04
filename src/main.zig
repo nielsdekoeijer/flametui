@@ -164,6 +164,7 @@ const Options = struct {
             \\                            Supported probe types:
             \\                              perf=[hz]         (e.g., --attach perf=99)
             \\                              kprobe=[name]     (e.g., --attach kprobe=vfs_read)
+            \\                              uprobe=[bin]:[sym](e.g., --attach uprobe=/lib/libc.so.6:malloc)
             \\                              tracepoint=[name] (e.g., --attach tracepoint=sched:sched_switch)
             \\
             \\Options (fixed): 

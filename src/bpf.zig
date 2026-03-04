@@ -158,6 +158,19 @@ pub const Object = struct {
             const link = c.bpf_program__attach_kprobe(self.program, retprobe, name) orelse return error.AttachFailure;
             return .{ .link = link };
         }
+
+        /// Attachment with uprobe
+        /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
+        pub fn attachUProbe(self: Program, retprobe: bool, binary: [:0]const u8, program: [:0]const u8) error{AttachFailure}!Link {
+            const link = c.attach_uprobe_helper(
+                self.program,
+                binary.ptr,
+                program.ptr,
+                retprobe,
+            ) orelse return error.AttachFailure;
+
+            return .{ .link = link };
+        }
     };
 
     /// View over a link to a program

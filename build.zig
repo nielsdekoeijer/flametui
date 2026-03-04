@@ -108,6 +108,11 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = true,
     });
 
+    // UGLY: zig currently can't translate the uprobe settings struct, so I just make a small helper to help us
+    mod.addCSourceFile(.{
+        .file = b.path("src/bpf/uprobe_helper.c"),
+    });
+
     mod.addIncludePath(.{
         .dependency = .{
             .dependency = vmlinuxGetSourceDependency(b),

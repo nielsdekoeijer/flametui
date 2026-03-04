@@ -5,5 +5,5 @@ pub const c = @cImport({
     @cInclude("bpf.h");
     @cInclude("linux/perf_event.h");
     @cInclude("stdlib.h");
+    @cInclude("uprobe_helper.h");
 });
-

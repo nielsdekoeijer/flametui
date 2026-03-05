@@ -139,7 +139,7 @@ pub const StackTrieUnmanaged = struct {
     }
 
     /// Adds an event to the trie
-    pub fn add(self: *StackTrieUnmanaged, allocator: std.mem.Allocator, event: EventType, umapCache: *UMapCacheUnmanaged) !void {
+    pub fn add(self: *StackTrieUnmanaged, allocator: std.mem.Allocator, event: EventType, umapCache: *UMapCacheUnmanaged, enable_pid: bool) !void {
         const pid = @as(PID, @intCast(event.pid));
         const tid = @as(TID, @intCast(event.tid));
 
@@ -189,7 +189,7 @@ pub const StackTrieUnmanaged = struct {
         }
 
         // Next, we add the pid node
-        {
+        if (enable_pid) {
             const key = Key{ .kind = .pid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
 
             const found = self.nodesLookup.get(key);
@@ -221,7 +221,7 @@ pub const StackTrieUnmanaged = struct {
         }
 
         // Next, we add the tid node
-        {
+        if (enable_pid) {
             const key = Key{ .kind = .tid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
 
             const found = self.nodesLookup.get(key);
@@ -251,6 +251,7 @@ pub const StackTrieUnmanaged = struct {
                 parent = nodeId;
             }
         }
+
         // Resolve user stack frames. We consider them in reverse as that is the one closest to the root node.
         var i = event.uips.len;
         while (i > 0) {

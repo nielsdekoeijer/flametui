@@ -67,6 +67,7 @@ const Options = struct {
     const GeneralOptions = struct {
         verbose: bool = true,
         enable_idle: bool = false,
+        enable_pid_symbol: bool = true,
     };
 
     pub const DefaultAttachment = &[_]flametui.Attachment{.{ .perf = .{ .hz = 99 } }};
@@ -192,6 +193,7 @@ const Options = struct {
             \\General:
             \\  --verbose       (optional) Enable verbose logging
             \\  --enable-idle   (optional) Include idle processes (pid 0) in measurements
+            \\  --no-pid-symbol (optional) Disable the pid and tid symbols in the graph (default on)
             \\  -h, --help      (optional) Print this help message
             \\
             \\
@@ -476,6 +478,9 @@ const Options = struct {
         } else if (std.mem.eql(u8, arg, "--enable-idle")) {
             general.enable_idle = true;
             return true;
+        } else if (std.mem.eql(u8, arg, "--no-pid-symbol")) {
+            general.enable_pid_symbol = false;
+            return true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             Options.usage(exe_name, writer) catch {};
             std.process.exit(0);
@@ -510,7 +515,7 @@ pub fn main() !void {
         .fixed => |*command| {
             requireRoot(writer, "flametui");
 
-            var app = try flametui.FixedApp.init(allocator, command.bins);
+            var app = try flametui.FixedApp.init(allocator, command.bins, opts.general.enable_pid_symbol);
             defer app.deinit();
 
             configureProfiler(&app.app.profiler, opts.general, command.pid);

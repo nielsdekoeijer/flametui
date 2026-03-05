@@ -90,7 +90,7 @@ const RingProfilerContext = struct {
         }
 
         // Cannot throw, so panic on error
-        context.iptrieCurrent.add(context.allocator, parsed, &context.umapCache) catch {
+        context.iptrieCurrent.add(context.allocator, parsed, &context.umapCache, true) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -117,7 +117,10 @@ const FixedContext = struct {
     /// We manage an allocator due to the callback, doesn't play nice with unmanaged design
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, bins: usize) !FixedContext {
+    /// If we should enable the pid measurement or not
+    enable_pid: bool,
+
+    pub fn init(allocator: std.mem.Allocator, bins: usize, enable_pid: bool) !FixedContext {
         const stacktries = try allocator.alloc(StackTrieUnmanaged, bins);
         errdefer allocator.free(stacktries);
 
@@ -133,6 +136,7 @@ const FixedContext = struct {
             .binDurationNanoseconds = std.math.maxInt(u64),
             .umapCache = try UMapCacheUnmanaged.init(allocator),
             .allocator = allocator,
+            .enable_pid = enable_pid,
         };
     }
 
@@ -160,7 +164,7 @@ const FixedContext = struct {
         }
 
         // Cannot throw, so panic on error
-        self.stacktries[self.binCurrent].add(self.allocator, parsed, &self.umapCache) catch {
+        self.stacktries[self.binCurrent].add(self.allocator, parsed, &self.umapCache, self.enable_pid) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -727,11 +731,11 @@ pub const FixedApp = struct {
     context: *FixedContext,
     app: ProfilerApp(FixedContext),
 
-    pub fn init(allocator: std.mem.Allocator, binsStackTrie: usize) !FixedApp {
+    pub fn init(allocator: std.mem.Allocator, binsStackTrie: usize, enable_pid: bool) !FixedApp {
         const bins = @max(binsStackTrie, 1);
         const context = try allocator.create(FixedContext);
         errdefer allocator.destroy(context);
-        context.* = try FixedContext.init(allocator, bins);
+        context.* = try FixedContext.init(allocator, bins, enable_pid);
         errdefer context.deinit();
 
         return .{

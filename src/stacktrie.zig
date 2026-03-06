@@ -382,7 +382,7 @@ pub const StackTrieUnmanaged = struct {
             .kips = &[_]u64{ 0xAAAA, 0xBBBB },
         };
 
-        try trie.add(std.testing.allocator, event, &cache);
+        try trie.add(std.testing.allocator, event, &cache, true);
 
         // root + 2 kernel frames + pid/tid/comm
         try std.testing.expectEqual(6, trie.nodes.items.len);
@@ -412,8 +412,8 @@ pub const StackTrieUnmanaged = struct {
             .kips = &[_]u64{0xAAAA},
         };
 
-        try trie.add(std.testing.allocator, event, &cache);
-        try trie.add(std.testing.allocator, event, &cache);
+        try trie.add(std.testing.allocator, event, &cache, true);
+        try trie.add(std.testing.allocator, event, &cache, true);
 
         // Still only root + 1 kernel node (deduped) + pid/tid/comm
         try std.testing.expectEqual(5, trie.nodes.items.len);
@@ -433,6 +433,7 @@ pub const StackTrieUnmanaged = struct {
                 std.testing.allocator,
                 .{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} },
                 &cache,
+                true,
             );
         }
 

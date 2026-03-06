@@ -79,6 +79,8 @@ const Options = struct {
             ms: u64 = 1000,
             pid: ?[]i32 = null,
             bins: usize = 1,
+            no_tui: bool = false,
+            out: ?[]const u8 = null,
 
             pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
                 if (self.pid) |pid| {
@@ -170,8 +172,10 @@ const Options = struct {
             \\
             \\Options (fixed): 
             \\  --ms      <int>  (optional) Profile duration in milliseconds (default: 1000)
-            \\  --bins    <int>  (optional) Number of bins to split into (default: 1)
+            \\  --bins    <int>  (optional) Number of bins to split into (default: 1), unsupported with --no-tui
             \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
+            \\  --no-tui         (optional) Do not open TUI, just dump collapsed stack traces to file
+            \\  --out     <str>  (optional) Custom output file path for no-tui mode, otherwise ignored
             \\
             \\Options (aggregate):
             \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
@@ -193,7 +197,7 @@ const Options = struct {
             \\General:
             \\  --verbose       (optional) Enable verbose logging
             \\  --enable-idle   (optional) Include idle processes (pid 0) in measurements
-            \\  --no-pid-symbol (optional) Disable the pid and tid symbols in the graph (default on)
+            \\  --no-pid-symbol (optional) Disable the pid and tid symbols in the graph (defaults enabled)
             \\  -h, --help      (optional) Print this help message
             \\
             \\
@@ -348,6 +352,12 @@ const Options = struct {
                     opts.bins = parseIntArgOrExit(usize, &args, "--bins", writer, exe_name);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
                     opts.pid = try parseIntSliceArgOrExit(i32, allocator, &args, "--pid", writer, exe_name);
+                } else if (std.mem.eql(u8, arg, "--no-tui")) {   
+                    opts.no_tui = true;                          
+                } else if (std.mem.eql(u8, arg, "--out")) {        
+                    opts.out = args.next() orelse {           
+                        exitWithUsage(writer, exe_name, "Missing value for --out\n", .{});
+                    };
                 } else if (parseGeneralOption(arg, &args, &general, exe_name, writer)) {
                     // handled
                 } else {
@@ -357,6 +367,12 @@ const Options = struct {
 
             if (opts.attachments.items.len == 0) {
                 try opts.attachments.appendSlice(allocator, DefaultAttachment);
+            }
+
+            if (opts.no_tui) {
+                if (opts.bins != 1) {
+                    exitWithUsage(writer, exe_name, "No support for '--bins' with '--no-tui'\n", .{});
+                }
             }
 
             return .{ .general = general, .command = .{ .fixed = opts } };
@@ -526,7 +542,7 @@ pub fn main() !void {
                 allocator.free(attachments);
             }
 
-            try app.run(attachments, command.ms * std.time.ns_per_ms);
+            try app.run(attachments, command.ms * std.time.ns_per_ms, command.no_tui, command.out);
         },
         .aggregate => |*command| {
             requireRoot(writer, "flametui");

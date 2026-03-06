@@ -162,6 +162,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    mod_tests.addCSourceFile(.{
+        .file = b.path("src/bpf/uprobe_helper.c"),
+    });
+
     const run_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);

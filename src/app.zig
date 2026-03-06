@@ -751,7 +751,7 @@ pub const FixedApp = struct {
         self.allocator.destroy(self.context);
     }
 
-    pub fn run(self: *FixedApp, attachments: []Attachment, timeout_ns: u64) !void {
+    pub fn run(self: *FixedApp, attachments: []Attachment, timeout_ns: u64, no_tui: bool, out: ?[]const u8) !void {
         const binCount = self.context.stacktries.len;
 
         if (binCount > 1) {
@@ -782,6 +782,43 @@ pub const FixedApp = struct {
                 }
             }
         }
+
+        if (no_tui) {
+            var filename_buf: [64]u8 = undefined;
+            const out_path = out orelse blk: {
+                const timestamp = std.time.nanoTimestamp();
+                break :blk std.fmt.bufPrint(&filename_buf, "flametui_{d}.collapsed", .{timestamp}) catch |err| {
+                    std.log.err("Failed to format filename: {}", .{err});
+                    return error.Export;
+                };
+            };
+
+            const file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+                std.log.err("Failed to create export file: {}", .{err});
+                return error.Export;
+            };
+            defer file.close();
+
+            var buf: [8192]u8 = undefined;
+            var writer = file.writer(&buf);
+
+            // NOTE: hard assumption here that bins == 1
+            const list = self.app.symbols.list.lock();
+            defer self.app.symbols.list.unlock();
+
+            (list.*)[0].exportCollapsed(&writer.interface) catch |err| {
+                std.log.err("Failed to export collapsed: {}", .{err});
+                return error.Export;
+            };
+
+            writer.interface.flush() catch |err| {
+                std.log.err("Failed to flush export: {}", .{err});
+                return error.Export;
+            };
+
+            return;
+        }
+        
 
         try self.app.interface.start();
     }

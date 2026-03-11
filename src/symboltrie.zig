@@ -129,6 +129,9 @@ pub const SymbolTrie = struct {
     /// Helps us lookup indices for parent <-> child relations
     nodesLookup: std.AutoArrayHashMapUnmanaged(Key, NodeId),
 
+    /// Demangling is expensive, so we cache it
+    demangleCache: std.StringHashMapUnmanaged([]const u8),
+
     /// Store our allocator, not unmanaged
     allocator: std.mem.Allocator,
 
@@ -149,6 +152,7 @@ pub const SymbolTrie = struct {
             .allocator = allocator,
             .kmap = kmap,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
+            .demangleCache = .{},
         };
     }
 
@@ -165,6 +169,7 @@ pub const SymbolTrie = struct {
             .allocator = allocator,
             .kmap = null,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
+            .demangleCache = .{},
         };
         errdefer self.deinit();
 
@@ -296,7 +301,7 @@ pub const SymbolTrie = struct {
                             .hitCount = 1,
                             .parent = parentId,
                             .payload = .{ .user = .{
-                                .symbol = try tryDemangleOrDupe(self.allocator, payload.items[j].symbol),
+                                .symbol = try self.getDemangledOrDupe(payload.items[j].symbol),
                                 .dll = try self.allocator.dupe(u8, payload.items[j].dll),
                             } },
                             .children = try std.ArrayListUnmanaged(NodeId).initCapacity(self.allocator, 0),
@@ -342,6 +347,7 @@ pub const SymbolTrie = struct {
             .allocator = allocator,
             .kmap = null,
             .sharedObjectMapCache = try SharedObjectMapCache.init(allocator),
+            .demangleCache = .{},
         };
         errdefer self.deinit();
 
@@ -400,7 +406,7 @@ pub const SymbolTrie = struct {
                         .payload = .{
                             .user = .{
                                 // take the symbol, takes ownership!
-                                .symbol = try tryDemangleOrDupe(self.allocator, symbol),
+                                .symbol = try self.getDemangledOrDupe(symbol),
                                 // clone the dll for debug later
                                 .dll = try self.allocator.dupe(u8, "<Imported from Collapsed>"),
                             },
@@ -420,6 +426,25 @@ pub const SymbolTrie = struct {
             }
         }
         return self;
+    }
+
+    fn getDemangledOrDupe(self: *SymbolTrie, mangled_name: []const u8) ![]const u8 {
+        if (self.demangleCache.get(mangled_name)) |cached| {
+            return try self.allocator.dupe(u8, cached);
+        }
+
+        const result = try tryDemangleOrDupe(self.allocator, mangled_name);
+        errdefer self.allocator.free(result);
+
+        const key = try self.allocator.dupe(u8, mangled_name);
+        errdefer self.allocator.free(key);
+
+        const val = try self.allocator.dupe(u8, result);
+        errdefer self.allocator.free(val);
+
+        try self.demangleCache.put(self.allocator, key, val);
+
+        return result;
     }
 
     test "symboltrie.SymbolTrie.initCollapsed parses simple collapsed format" {
@@ -598,15 +623,15 @@ pub const SymbolTrie = struct {
                     switch (s.find(e.umapip, p)) {
                         .found => |w| {
                             isduped = true;
-                            break :blk try tryDemangleOrDupe(self.allocator, w.name);
+                            break :blk try self.getDemangledOrDupe(w.name);
                         },
                         .notfound => {
                             isduped = true;
-                           break :blk try std.fmt.allocPrint(self.allocator, "notfound:0x{x}", .{e.umapip});
+                            break :blk try std.fmt.allocPrint(self.allocator, "notfound:0x{x}", .{e.umapip});
                         },
                         .unmapped => {
                             isduped = true;
-                           break :blk try std.fmt.allocPrint(self.allocator, "unmapped:0x{x}", .{e.umapip});
+                            break :blk try std.fmt.allocPrint(self.allocator, "unmapped:0x{x}", .{e.umapip});
                         },
                     }
                 },
@@ -666,19 +691,22 @@ pub const SymbolTrie = struct {
                                         .symbol = try self.allocator.dupe(u8, symbol),
                                     },
                                 },
-                                .comm, => break :blk TriePayload{
+                                .comm,
+                                => break :blk TriePayload{
                                     .comm = .{
                                         // take the symbol + dupe, takes ownership!
                                         .symbol = try self.allocator.dupe(u8, symbol),
                                     },
                                 },
-                                .pid , => break :blk TriePayload{
+                                .pid,
+                                => break :blk TriePayload{
                                     .pid = .{
                                         // take the symbol + dupe, takes ownership!
                                         .symbol = try self.allocator.dupe(u8, symbol),
                                     },
                                 },
-                                .tid , => break :blk TriePayload{
+                                .tid,
+                                => break :blk TriePayload{
                                     .tid = .{
                                         // take the symbol + dupe, takes ownership!
                                         .symbol = try self.allocator.dupe(u8, symbol),
@@ -722,7 +750,12 @@ pub const SymbolTrie = struct {
         for (self.nodes.items) |*node| {
             node.children.deinit(self.allocator);
             switch (node.payload) {
-                .kernel, .root, .comm, .pid, .tid, => |s| self.allocator.free(s.symbol),
+                .kernel,
+                .root,
+                .comm,
+                .pid,
+                .tid,
+                => |s| self.allocator.free(s.symbol),
                 .user => |s| {
                     self.allocator.free(s.symbol);
                     self.allocator.free(s.dll);
@@ -733,5 +766,14 @@ pub const SymbolTrie = struct {
         self.nodes.deinit(self.allocator);
         self.nodesLookup.deinit(self.allocator);
         self.sharedObjectMapCache.deinit();
+
+        var it = self.demangleCache.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+
+        // Finally, destroy the map's internal arrays
+        self.demangleCache.deinit(self.allocator);
     }
 };

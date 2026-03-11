@@ -109,8 +109,8 @@ const Options = struct {
         },
         ring: struct {
             attachments: std.ArrayListUnmanaged(flametui.Attachment) = .{},
-            ms: u64 = 50,
-            n: usize = 10,
+            ms: u64 = 250,
+            n: usize = 4,
             pid: ?[]i32 = null,
 
             pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -181,8 +181,8 @@ const Options = struct {
             \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (ring):
-            \\  --ms      <int>  (optional) Size of ring slot in milliseconds (default: 50)
-            \\  --n       <int>  (optional) Number of slots in ring buffer, minimum 4 (default: 10)
+            \\  --ms      <int>  (optional) Size of ring slot in milliseconds (default: 250)
+            \\  --n       <int>  (optional) Number of slots in ring buffer, minimum 4 (default: 4)
             \\  --pid     <int>  (optional) Process IDs to filter by, space separated (default: all)
             \\
             \\Options (trigger):

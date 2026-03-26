@@ -145,11 +145,12 @@ pub const SharedObjectMap = struct {
                 }
 
                 const candidate = s.symbols.items[index - 1];
-                if (ip < candidate.addr + candidate.size) {
+
+                if (candidate.size == 0 or ip <= candidate.addr + candidate.size) {
                     return .{ .found = candidate };
                 }
 
-                return .{ .found = candidate };
+                return .{ .notfound = .{} };
 
                 // NOTE: this would make sense, but apparently we can just return the candidate. I'm not sure if I
                 // understand why this happens. It's a major TODO to figure this out.

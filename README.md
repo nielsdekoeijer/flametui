@@ -55,6 +55,13 @@ Note that you can **click on the nodes** to expand the view! You can also naviga
 
 All profiling commands also accept `--verbose` for debug logging and `--enable-idle` to include idle (pid 0) samples.
 
+## Creating official flamegraph 
+
+I've added some support for making official flamegraphs by supporting the `.collapsed` format.
+This is done by hitting `e` while in tui mode (probably should support something more headless).
+
+This file can then be used by the `flamegraph.pl` program to make the svg as usual.
+
 ## Future Roadmap / Ideas
 
 Before `0.0.3-alpha`:

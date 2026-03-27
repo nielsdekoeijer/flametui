@@ -39,7 +39,8 @@ sudo zig-out/bin/flametui aggregate --attach tracepoint=kmem:kmalloc
 sudo zig-out/bin/flametui ring --attach kprobe=alloc_fd --ms 50 --n 10
 
 # Profile specific Process IDs (space separated string). These's pids are filtered inside of the eBPF program!
-sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)"
+sudo zig-out/bin/flametui fixed --pid "$(pidof YOUR_PROC_NAME)" --attach uprobe=/lib64/libc.so.6:malloc
+
 ```
 
 If you dont want to use my profiler (I must admit it is janky), you can also try doing something like:

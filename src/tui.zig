@@ -343,6 +343,7 @@ const VaxisEvent = union(enum) {
     winsize: vaxis.Winsize,
     color_report: vaxis.Color.Report,
     redraw: void,
+    quit: void,
 };
 
 /// Object managing plotting and events
@@ -479,6 +480,9 @@ pub const Interface = struct {
                     .redraw => {
                         dirty = true;
                     },
+
+                    // So another thread can signal us to quit
+                    .quit => break :tui_loop,
 
                     // Presses
                     .key_press => |key| {

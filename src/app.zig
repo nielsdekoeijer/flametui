@@ -470,7 +470,13 @@ pub fn ProfilerApp(ContextType: type) type {
         /// Worker thread, draining bpf events
         fn bpfWorker(self: *@This(), attachments: []Attachment) void {
             self.profiler.start(self.allocator, attachments) catch {
-                @panic("Could not start profiler");
+                self.shouldQuit.store(true, .release);
+                
+                if (self.interface.loop) |*loop| {
+                    loop.postEvent(.{ .quit = {} });
+                }
+
+                return;
             };
 
             const interval = 50 * std.time.ms_per_s;

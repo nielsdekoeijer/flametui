@@ -16,7 +16,7 @@ pub const TID = u64;
 /// Helpers
 /// ===================================================================================================================
 /// The event type from bpf
-pub const EventTypeRaw = u64;
+pub const ProfilerEventTypeRaw = u64;
 
 /// Our parsed view over the raw data, note we dont clone for efficiencies sake
 /// Wire layout (all fields are `u64`):
@@ -27,7 +27,7 @@ pub const EventTypeRaw = u64;
 ///   [3]  ks
 ///   [4]  user IPs ... kernel IPs
 /// ```
-pub const EventType = struct {
+pub const ProfilerEventType = struct {
     pid: u64,
     tid: u64,
     timestamp: u64,
@@ -35,14 +35,14 @@ pub const EventType = struct {
     uips: []const u64,
 
     // We parse from a raw pointer
-    pub fn init(raw: *const EventTypeRaw) EventType {
+    pub fn init(raw: *const ProfilerEventTypeRaw) ProfilerEventType {
         const ev = @as([*]const u64, @ptrCast(raw));
 
         // Sizes are given in bytes
         const us = ev[2] / 8;
         const ks = ev[3] / 8;
 
-        const event = EventType{
+        const event = ProfilerEventType{
             .pid = ev[0] >> 32,
             .tid = ev[0] & 0xFFFFFFFF,
             .timestamp = ev[1],
@@ -53,7 +53,7 @@ pub const EventType = struct {
         return event;
     }
 
-    test "profile.EventType.init parses mixed user and kernel stacks correctly" {
+    test "profile.ProfilerEventType.init parses mixed user and kernel stacks correctly" {
         const raw = [_]u64{
             (@as(u64, 32) << 32) | 100, // [0] pid (32) | tid (100) -> (32 << 32) | 100
             123456789, // [1] timestamp -> 123456789
@@ -67,7 +67,7 @@ pub const EventType = struct {
         };
 
         // Cast the pointer to the type expected by init
-        const event = EventType.init(@ptrCast(&raw[0]));
+        const event = ProfilerEventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(32, event.pid);
         try std.testing.expectEqual(100, event.tid);
@@ -85,20 +85,20 @@ pub const EventType = struct {
         try std.testing.expectEqual(0x3333, event.kips[2]);
     }
 
-    test "profile.EventType.init parses minimal event with empty stacks" {
+    test "profile.ProfilerEventType.init parses minimal event with empty stacks" {
         const raw = [_]u64{ @as(u64, 42) << 32, 0, 0, 0 };
 
-        const event = EventType.init(@ptrCast(&raw[0]));
+        const event = ProfilerEventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(42, event.pid);
         try std.testing.expectEqual(0, event.uips.len);
         try std.testing.expectEqual(0, event.kips.len);
     }
 
-    test "profile.EventType.init parses kernel-only stacks" {
+    test "profile.ProfilerEventType.init parses kernel-only stacks" {
         const raw = [_]u64{ @as(u64, 99) << 32, 0, 0, 16, 0x1111, 0x2222 };
 
-        const event = EventType.init(@ptrCast(&raw[0]));
+        const event = ProfilerEventType.init(@ptrCast(&raw[0]));
 
         try std.testing.expectEqual(99, event.pid);
         try std.testing.expectEqual(0, event.uips.len);
@@ -216,7 +216,7 @@ pub const Attachment = union(enum) {
 /// ===================================================================================================================
 /// Wrappers
 /// ===================================================================================================================
-/// Wrapper around our profiling ebpf program
+/// Wrapper around our profiling ebpf programs
 pub const ProfilerUnmanaged = struct {
     /// Owned copy of our bpf code
     bytecode: []align(8) const u8,
@@ -235,7 +235,7 @@ pub const ProfilerUnmanaged = struct {
 
     pub fn init(
         comptime ContextType: type,
-        comptime handler: *const fn (*ContextType, *const EventTypeRaw) void,
+        comptime handler: *const fn (*ContextType, *const ProfilerEventTypeRaw) void,
         allocator: std.mem.Allocator,
         context: *ContextType,
     ) !ProfilerUnmanaged {
@@ -251,7 +251,7 @@ pub const ProfilerUnmanaged = struct {
         errdefer object.deinit();
 
         // Create ringbuffer
-        var ring = try object.findRingBuffer(ContextType, EventTypeRaw, handler, context, "events");
+        var ring = try object.findRingBuffer(ContextType, ProfilerEventTypeRaw, handler, context, "events");
         errdefer ring.deinit();
 
         // Global from the program

@@ -13,8 +13,8 @@ const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
 const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 const StackTrieUnmanaged = @import("stacktrie.zig").StackTrieUnmanaged;
-const EventType = @import("profile.zig").EventType;
-const EventTypeRaw = @import("profile.zig").EventTypeRaw;
+const ProfilerEventType = @import("profile.zig").ProfilerEventType;
+const ProfilerEventTypeRaw = @import("profile.zig").ProfilerEventTypeRaw;
 const Program = @import("profile.zig").Program;
 const ProfilerUnmanaged = @import("profile.zig").ProfilerUnmanaged;
 const Interface = @import("tui.zig").Interface;
@@ -70,8 +70,8 @@ const RingProfilerContext = struct {
         defer self.* = undefined;
     }
 
-    pub fn callback(context: *RingProfilerContext, event: *const EventTypeRaw) void {
-        const parsed = EventType.init(event);
+    pub fn callback(context: *RingProfilerContext, event: *const ProfilerEventTypeRaw) void {
+        const parsed = ProfilerEventType.init(event);
 
         if (context.binStartNanoseconds) |*binStartNanoseconds| {
             while (parsed.timestamp >= binStartNanoseconds.* +| context.binDurationNanoseconds) {
@@ -149,8 +149,8 @@ const FixedContext = struct {
         self.* = undefined;
     }
 
-    pub fn callback(self: *FixedContext, event: *const EventTypeRaw) void {
-        const parsed = EventType.init(event);
+    pub fn callback(self: *FixedContext, event: *const ProfilerEventTypeRaw) void {
+        const parsed = ProfilerEventType.init(event);
 
         if (self.binStartNanoseconds) |*start| {
             while (parsed.timestamp >= start.* +| self.binDurationNanoseconds) {

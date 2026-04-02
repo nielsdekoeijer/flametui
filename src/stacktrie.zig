@@ -8,7 +8,7 @@ const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
 
-const EventType = @import("profile.zig").EventType;
+const ProfilerEventType = @import("profile.zig").ProfilerEventType;
 
 /// ===================================================================================================================
 /// StackTrieUnmanaged
@@ -139,7 +139,13 @@ pub const StackTrieUnmanaged = struct {
     }
 
     /// Adds an event to the trie
-    pub fn add(self: *StackTrieUnmanaged, allocator: std.mem.Allocator, event: EventType, umapCache: *UMapCacheUnmanaged, enable_pid: bool) !void {
+    pub fn add(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        event: ProfilerEventType,
+        umapCache: *UMapCacheUnmanaged,
+        enable_pid: bool,
+    ) !void {
         const pid = @as(PID, @intCast(event.pid));
         const tid = @as(TID, @intCast(event.tid));
 
@@ -374,7 +380,7 @@ pub const StackTrieUnmanaged = struct {
         var cache = try UMapCacheUnmanaged.init(std.testing.allocator);
         defer cache.deinit(std.testing.allocator);
 
-        const event = EventType{
+        const event = ProfilerEventType{
             .pid = 1,
             .tid = 0,
             .timestamp = 0,
@@ -404,7 +410,7 @@ pub const StackTrieUnmanaged = struct {
         var cache = try UMapCacheUnmanaged.init(std.testing.allocator);
         defer cache.deinit(std.testing.allocator);
 
-        const event = EventType{
+        const event = ProfilerEventType{
             .pid = 1,
             .tid = 0,
             .timestamp = 0,

@@ -71,10 +71,10 @@ Before `0.0.3-alpha`:
     - [x] src/bpf.zig
     - [x] src/cimport.zig
     - [x] src/kmap.zig
-    - [ ] src/lock.zig
+    - [x] src/lock.zig
     - [ ] src/main.zig
-    - [ ] src/profile.zig
-    - [ ] src/root.zig
+    - [x] src/profile.zig
+    - [x] src/root.zig
     - [ ] src/sharedobject.zig
     - [ ] src/stacktrie.zig
     - [ ] src/symboltrie.zig

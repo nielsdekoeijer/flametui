@@ -100,7 +100,7 @@ static __always_inline int process_event(void *ctx) {
   if (kres > 0) {
     kstack_size = kres;
     if (kstack_size >= MAX_STACK_DEPTH * sizeof(__u64)) {
-      kstack_size = MAX_STACK_DEPTH * sizeof(__u64) - 1;
+      kstack_size = (MAX_STACK_DEPTH - 1) * sizeof(__u64);
     }
   }
 
@@ -111,7 +111,7 @@ static __always_inline int process_event(void *ctx) {
   if (ures > 0) {
     ustack_size = ures;
     if (ustack_size >= MAX_STACK_DEPTH * sizeof(__u64)) {
-      ustack_size = MAX_STACK_DEPTH * sizeof(__u64) - 1;
+      kstack_size = (MAX_STACK_DEPTH - 1) * sizeof(__u64);
     }
   }
 

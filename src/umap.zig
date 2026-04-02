@@ -2,6 +2,9 @@ const std = @import("std");
 const PID = @import("profile.zig").PID;
 const InstructionPointer = @import("profile.zig").InstructionPointer;
 
+// TODO: String interning for the UMapEntry path. Probably we want to make a new object just for that that can be used 
+// in multiple places...!
+
 /// ===================================================================================================================
 /// UMap
 /// ===================================================================================================================
@@ -152,6 +155,7 @@ pub const UMapUnmanaged = union(enum) {
             // Ensure sane output
             if (index == 0) return null;
             if (self.backend.items[index - 1].addressEnd < ip) return null;
+
             return try self.backend.items[index - 1].dupe(allocator);
         }
 

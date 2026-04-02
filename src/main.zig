@@ -506,14 +506,20 @@ const Options = struct {
 };
 
 pub fn main() !void {
-    var backend = std.heap.GeneralPurposeAllocator(.{}).init;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer {
-        const check = backend.deinit();
-        if (check == .leak) {
-            std.debug.print("Memory leak detected!\n", .{});
+        if (@import("builtin").mode == .Debug) {
+            const check = gpa.deinit();
+            if (check == .leak) {
+                std.debug.print("Memory leak detected!\n", .{});
+            }
         }
     }
-    const allocator = backend.allocator();
+
+    const allocator = if (@import("builtin").mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.c_allocator;
 
     var stderr_buf: [512]u8 = undefined;
     var stderr = std.fs.File.stderr().writer(&stderr_buf);

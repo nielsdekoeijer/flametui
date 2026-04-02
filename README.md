@@ -76,7 +76,7 @@ Before `0.0.3-alpha`:
     - [x] src/profile.zig
     - [x] src/root.zig
     - [ ] src/sharedobject.zig
-    - [ ] src/stacktrie.zig
+    - [x] src/stacktrie.zig
     - [ ] src/symboltrie.zig
     - [ ] src/tui.zig
     - [ ] src/umap.zig

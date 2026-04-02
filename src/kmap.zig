@@ -40,7 +40,7 @@ pub const KMapUnmanaged = struct {
             const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
             defer allocator.free(content);
 
-            // Populate + sort
+            // Populate the arraylist
             try populate(allocator, &backend, content);
         }
 
@@ -118,7 +118,7 @@ pub const KMapUnmanaged = struct {
         // Loop through file contents
         while (lines.next()) |line| {
             if (line.len < 19) {
-                std.log.warn("Unexpected line of length '{}' encountered while parsing kmap", .{line.len});
+                std.log.debug("Unexpected line of length '{}' encountered while parsing kmap", .{line.len});
                 continue;
             }
 

@@ -69,8 +69,8 @@ Before `0.0.3-alpha`:
 - [ ] Review files ensuring tests in place and happy, and refactor the ugly code: 
     - [ ] src/app.zig
     - [x] src/bpf.zig
-    - [ ] src/cimport.zig
-    - [ ] src/kmap.zig
+    - [x] src/cimport.zig
+    - [x] src/kmap.zig
     - [ ] src/lock.zig
     - [ ] src/main.zig
     - [ ] src/profile.zig

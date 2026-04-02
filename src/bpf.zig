@@ -37,10 +37,12 @@ pub const Object = struct {
     /// libbpf underlying object type
     internal: *c.struct_bpf_object,
 
-    /// Initialize the object from memory
-    pub fn init(mem: []align(8) const u8) error{ OpenFailure, LoadFailure }!Object {
+    /// Initialize the object from bytecode array
+    pub fn init(mem: []align(8) const u8) error{ AlignFailure, OpenFailure, LoadFailure }!Object {
         // Critical for the memory to be 8 byte aligned
-        std.debug.assert(@intFromPtr(mem.ptr) % 8 == 0);
+        if (@intFromPtr(mem.ptr) % 8 != 0) {
+            return error.AlignFailure;
+        }
 
         // Load the elf file
         const internal = c.bpf_object__open_mem(@ptrCast(mem), mem.len, null) orelse return error.OpenFailure;
@@ -52,6 +54,12 @@ pub const Object = struct {
         }
 
         return .{ .internal = internal };
+    }
+
+    /// Cleanup and invalidate libbpf object
+    pub fn deinit(self: *Object) void {
+        c.bpf_object__close(self.internal);
+        self.* = undefined;
     }
 
     test "bpf.Object.init rejects invalid ELF" {
@@ -68,9 +76,8 @@ pub const Object = struct {
         try std.testing.expectError(error.OpenFailure, Object.init(program));
     }
 
-    /// Get a pointer to a specific single-value BPF map. Note that the access will NOT be atomic. For my current
-    /// purposes, we only write once on init. The missed count we read though, this could hit race condition.
-    pub fn getMapPointer(self: Object, name: [:0]const u8, comptime T: type) !Map(T) {
+    /// Returns a reference to an mmapped eBPF map
+    pub fn findMemoryMappedMap(self: Object, name: [:0]const u8, comptime T: type) !MemoryMappedMap(T) {
         const map = c.bpf_object__find_map_by_name(self.internal, name) orelse return error.MapNotFound;
 
         const value_size = c.bpf_map__value_size(map);
@@ -81,13 +88,18 @@ pub const Object = struct {
         const fd = c.bpf_map__fd(map);
         if (fd < 0) return error.MapNotMapped;
 
-        return try Map(T).init(fd);
+        return try MemoryMappedMap(T).init(fd);
     }
 
-    pub fn Map(T: type) type {
+    /// Helper type wrapping an eBPF map that is shared through mmapping the underlying map. This is useful for
+    /// quicker access, in contrast to using syscalls to interact with the eBPF maps.
+    ///
+    /// This object owns the underlying mmap'd shared memory and is responsible for cleaning it up
+    pub fn MemoryMappedMap(T: type) type {
         return struct {
-            map: *align(std.heap.page_size_min) volatile T,
+            map: []align(std.heap.page_size_min) u8,
 
+            /// Initialize from the file descriptor of the underlying map
             pub fn init(fd: std.posix.fd_t) !@This() {
                 const ptr = try std.posix.mmap(
                     null,
@@ -99,38 +111,59 @@ pub const Object = struct {
                 );
 
                 return .{
-                    .map = @as(*align(std.heap.page_size_min) volatile T, @ptrCast(@alignCast(ptr))),
+                    .map = ptr,
                 };
             }
 
+            /// Unmaps underlying memory and invalidates self
+            pub fn deinit(self: *@This()) void {
+                std.posix.munmap(self.map);
+                self.* = undefined;
+            }
+
+            /// Atomically read a field
             pub fn readAtomic(self: @This(), comptime field_name: []const u8) @FieldType(T, field_name) {
-                const ptr = &@field(self.map.*, field_name);
+                const ptr = &@field(self.ptrUnsafe().*, field_name);
                 return @atomicLoad(@FieldType(T, field_name), ptr, .acquire);
             }
 
+            /// Atomically write a field
             pub fn writeAtomic(self: *@This(), comptime field_name: []const u8, value: @FieldType(T, field_name)) void {
-                const ptr = &@field(self.map.*, field_name);
+                const ptr = &@field(self.ptrUnsafe().*, field_name);
                 @atomicStore(@FieldType(T, field_name), ptr, value, .release);
             }
 
-            pub fn deinit(self: *@This()) void {
-                const bytes = @as([]align(std.heap.page_size_min) const u8, @ptrCast(@volatileCast(self.map)));
-                std.posix.munmap(bytes);
-
-                self.* = undefined;
+            /// Helper function get a thread unsafe handle to the underlying memory as a pointer to the underlying type
+            pub fn ptrUnsafe(self: @This()) *align(std.heap.page_size_min) volatile T {
+                return @as(*align(std.heap.page_size_min) volatile T, @ptrCast(@alignCast(self.map)));
             }
         };
     }
 
     /// Get a program contained within the object
     pub fn findProgram(self: Object, name: [:0]const u8) error{ProgramNotFound}!Program {
-        const program: *c.bpf_program = c.bpf_object__find_program_by_name(self.internal, name) orelse return error.ProgramNotFound;
+        const program: *c.bpf_program = c.bpf_object__find_program_by_name(self.internal, name.ptr) orelse return error.ProgramNotFound;
         return .{ .program = program };
     }
 
-    /// View over a program stored inside an object
+    /// View over a program stored inside an object.
+    ///
+    /// Note that the bpf object used when creating the program owns it, and thus will clean it up.
     pub const Program = struct {
         program: *c.bpf_program,
+
+        /// View over a link to a program
+        pub const Link = struct {
+            link: *c.struct_bpf_link,
+
+            pub fn deinit(self: *Link) void {
+                if (c.bpf_link__destroy(self.link) != 0) {
+                    @panic("ebpf link destruction failure");
+                }
+
+                self.* = undefined;
+            }
+        };
 
         /// Generic attachment
         pub fn attach(self: Program) error{AttachFailure}!Link {
@@ -139,6 +172,7 @@ pub const Object = struct {
         }
 
         /// Attachment with perf event file descriptor
+        ///
         /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
         pub fn attachPerfEvent(self: Program, fd: std.posix.fd_t) error{AttachFailure}!Link {
             const link = c.bpf_program__attach_perf_event(self.program, fd) orelse return error.AttachFailure;
@@ -146,6 +180,7 @@ pub const Object = struct {
         }
 
         /// Attachment with tracepoint
+        ///
         /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
         pub fn attachTracepoint(self: Program, category: [:0]const u8, name: [:0]const u8) error{AttachFailure}!Link {
             const link = c.bpf_program__attach_tracepoint(self.program, category, name) orelse return error.AttachFailure;
@@ -153,6 +188,7 @@ pub const Object = struct {
         }
 
         /// Attachment with kprobe
+        ///
         /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
         pub fn attachKProbe(self: Program, retprobe: bool, name: [:0]const u8) error{AttachFailure}!Link {
             const link = c.bpf_program__attach_kprobe(self.program, retprobe, name) orelse return error.AttachFailure;
@@ -160,6 +196,7 @@ pub const Object = struct {
         }
 
         /// Attachment with uprobe
+        ///
         /// On success, libbpf takes ownership of fd. On failure, caller must close fd.
         pub fn attachUProbe(self: Program, retprobe: bool, binary: [:0]const u8, symbol: [:0]const u8) error{AttachFailure}!Link {
             const link = c.attach_uprobe_helper(
@@ -170,19 +207,6 @@ pub const Object = struct {
             ) orelse return error.AttachFailure;
 
             return .{ .link = link };
-        }
-    };
-
-    /// View over a link to a program
-    pub const Link = struct {
-        link: *c.struct_bpf_link,
-
-        pub fn deinit(self: *Link) void {
-            if (c.bpf_link__destroy(self.link) != 0) {
-                @panic("ebpf link destruction failure");
-            }
-
-            self.* = undefined;
         }
     };
 
@@ -214,8 +238,15 @@ pub const Object = struct {
     }
 
     /// View over a ringbuffer with an associated callback
+    ///
+    /// Note that the bpf object used when creating the ringbuffer owns it, and thus will clean it up.
     pub const RingBuffer = struct {
         ringbuffer: *c.struct_ring_buffer,
+
+        pub fn deinit(self: *RingBuffer) void {
+            c.ring_buffer__free(self.ringbuffer);
+            self.* = undefined;
+        }
 
         pub fn callback(
             comptime ContextType: type,
@@ -223,6 +254,8 @@ pub const Object = struct {
             comptime handler: *const fn (*ContextType, *const EventType) void,
         ) fn (?*anyopaque, ?*anyopaque, usize) callconv(.c) c_int {
             return struct {
+                // TODO: this is quite unsafe, we are also throwing away the size. There's a more elegant solution 
+                // possible here I think...
                 pub fn handlerWrapper(ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int {
                     _ = size;
                     const event = @as(*const EventType, @ptrCast(@alignCast(data orelse @panic("event is null"))));
@@ -233,12 +266,14 @@ pub const Object = struct {
             }.handlerWrapper;
         }
 
+        /// Check the ringbuffer for items and invoke the callback
         pub fn poll(self: RingBuffer, ms: i64) error{PollFailure}!void {
             if (c.ring_buffer__poll(self.ringbuffer, @intCast(ms)) < 0) {
                 return error.PollFailure;
             }
         }
 
+        /// Consume one entry from the ring buffer and return 
         pub fn consume(self: RingBuffer) error{ConsumeFailure}!usize {
             const ret = c.ring_buffer__consume(self.ringbuffer);
             if (ret < 0) {
@@ -248,17 +283,7 @@ pub const Object = struct {
             return @intCast(ret);
         }
 
-        pub fn deinit(self: *RingBuffer) void {
-            c.ring_buffer__free(self.ringbuffer);
-            self.* = undefined;
-        }
     };
-
-    /// Cleanup + invalidate
-    pub fn deinit(self: *Object) void {
-        c.bpf_object__close(self.internal);
-        self.* = undefined;
-    }
 };
 
 // --------------------------------------------------------------------------------------------------------------------

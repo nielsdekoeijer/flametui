@@ -225,13 +225,13 @@ pub const ProfilerUnmanaged = struct {
     object: bpf.Object,
 
     /// Connections of our bpf object, stays alive
-    links: ?[]bpf.Object.Link,
+    links: ?[]bpf.Object.Program.Link,
 
     /// Ringbuffer inside our ebpf program
     ring: bpf.Object.RingBuffer,
 
     /// Global values for our bpf object
-    globals: bpf.Object.Map(Definitions.globals_t),
+    globals: bpf.Object.MemoryMappedMap(Definitions.globals_t),
 
     pub fn init(
         comptime ContextType: type,
@@ -255,7 +255,7 @@ pub const ProfilerUnmanaged = struct {
         errdefer ring.deinit();
 
         // Global from the program
-        var globals = try object.getMapPointer("globals_map", Definitions.globals_t);
+        var globals = try object.findMemoryMappedMap("globals_map", Definitions.globals_t);
         errdefer globals.deinit();
 
         return ProfilerUnmanaged{
@@ -287,7 +287,7 @@ pub const ProfilerUnmanaged = struct {
         }
 
         // Use a dynamic list to gather all links safely
-        var link_list: std.ArrayListUnmanaged(bpf.Object.Link) = .{};
+        var link_list: std.ArrayListUnmanaged(bpf.Object.Program.Link) = .{};
 
         // If anything fails midway, destroy all previously successful attachments
         errdefer {

@@ -40,16 +40,16 @@ fn requireRoot(writer: *std.Io.Writer, exe_name: []const u8) void {
 
 /// Configures a profiler, just to prevent code dupe
 fn configureProfiler(profiler: anytype, general: Options.GeneralOptions, pid: ?[]i32) void {
-    profiler.globals.map.enable_idle = if (general.enable_idle) 1 else 0;
+    profiler.globals.ptrUnsafe().enable_idle = if (general.enable_idle) 1 else 0;
 
     if (pid) |p| {
         const len = @min(32, p.len);
         for (0..len) |i| {
-            profiler.globals.map.pids[i] = @intCast(p[i]);
+            profiler.globals.ptrUnsafe().pids[i] = @intCast(p[i]);
         }
-        profiler.globals.map.pids_len = len;
+        profiler.globals.ptrUnsafe().pids_len = len;
     } else {
-        profiler.globals.map.pids_len = 0;
+        profiler.globals.ptrUnsafe().pids_len = 0;
     }
 }
 

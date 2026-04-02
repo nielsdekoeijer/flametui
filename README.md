@@ -68,7 +68,7 @@ This file can then be used by the `flamegraph.pl` program to make the svg as usu
 Before `0.0.3-alpha`:
 - [ ] Review files ensuring tests in place and happy, and refactor the ugly code: 
     - [ ] src/app.zig
-    - [ ] src/bpf.zig
+    - [x] src/bpf.zig
     - [ ] src/cimport.zig
     - [ ] src/kmap.zig
     - [ ] src/lock.zig

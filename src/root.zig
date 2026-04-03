@@ -15,5 +15,6 @@ test {
     std.testing.refAllDeclsRecursive(@import("stacktrie.zig"));
     std.testing.refAllDeclsRecursive(@import("sharedobject.zig"));
     std.testing.refAllDeclsRecursive(@import("symboltrie.zig"));
+    std.testing.refAllDeclsRecursive(@import("interner.zig"));
     std.testing.refAllDecls(@import("profile.zig"));
 }

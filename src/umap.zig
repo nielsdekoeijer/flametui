@@ -1,49 +1,59 @@
 const std = @import("std");
 const PID = @import("profile.zig").PID;
 const InstructionPointer = @import("profile.zig").InstructionPointer;
-
-// TODO: String interning for the UMapEntry path. Probably we want to make a new object just for that that can be used 
-// in multiple places...!
+const StringInternerUnmanaged = @import("interner.zig").StringInternerUnmanaged;
 
 /// ===================================================================================================================
 /// UMap
 /// ===================================================================================================================
-/// UMaps are expensive to load and also can be invalidated, thus we have a cache. This class is a map between PID
-/// and UMap.
-///
-/// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be
-/// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to
-/// trigger a reload. Current risk is that the memory of the program keeps growing while measuring.
+/// UMaps are expensive to load and also can be invalidated. Thus, we have a cache that prevents duplicated work and
+/// manages lifetimes. This class is a map between PID and already parsed UMap.
 pub const UMapCacheUnmanaged = struct {
     backend: std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged),
+    interner: StringInternerUnmanaged,
 
+    /// Initialize with an empty cache
     pub fn init(allocator: std.mem.Allocator) !UMapCacheUnmanaged {
-        const backend = try std.AutoArrayHashMapUnmanaged(PID, UMapUnmanaged).init(
-            allocator,
-            &[_]PID{},
-            &[_]UMapUnmanaged{},
-        );
-
-        return UMapCacheUnmanaged{
-            .backend = backend,
+        return .{
+            .backend = try .init(
+                allocator,
+                &[_]PID{},
+                &[_]UMapUnmanaged{},
+            ),
+            .interner = .init(),
         };
     }
 
+    /// Free underlying UMaps and container
     pub fn deinit(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator) void {
+        // UMaps require deallocation to be destructed
         for (self.backend.values()) |*entry| {
             switch (entry.*) {
-                .loaded => |*item| item.deinit(allocator),
-                else => {},
+                .loaded => |*item| item.deinit(allocator, &self.interner),
+                .zombie => {},
             }
         }
 
         self.backend.deinit(allocator);
 
+        self.interner.deinit(allocator);
+
         self.* = undefined;
     }
 
+    /// Invalidate a umap, deinitializing it and removing it from the cache
+    ///
+    /// TODO: PIDs can die. Currently we do not have any logic to handle this. I think we should allow PIDs to be
+    /// invalidated, so that should probably be a method on this class. When invalidated YET used again, we need to
+    /// trigger a reload. Current risk is that the memory of the program keeps growing while measuring.
+    pub fn invalidate(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator, pid: PID) !void {
+        _ = self;
+        _ = allocator;
+        _ = pid;
+    }
+
     /// Return entry given pid, or create it
-    pub fn find(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator, pid: PID) !*UMapUnmanaged {
+    pub fn findOrEmplace(self: *UMapCacheUnmanaged, allocator: std.mem.Allocator, pid: PID) !*UMapUnmanaged {
         // Try to find it
         {
             const found = self.backend.getPtr(pid);
@@ -53,9 +63,9 @@ pub const UMapCacheUnmanaged = struct {
         }
 
         // If not found, create one.
-        var map = try UMapUnmanaged.init(allocator, pid);
+        var map = try UMapUnmanaged.init(allocator, &self.interner, pid);
         errdefer switch (map) {
-            .loaded => |*item| item.deinit(allocator),
+            .loaded => |*item| item.deinit(allocator, &self.interner),
             .zombie => {},
         };
 
@@ -69,8 +79,8 @@ pub const UMapCacheUnmanaged = struct {
             }
         }
 
-        // Fail unreachable, we just added it
-        unreachable;
+        // Fail unreachable, we just added it so this shouldn't ever be possible
+        @panic("Unable to find umap after creating it, unreachable");
     }
 };
 
@@ -88,8 +98,8 @@ pub const UMapEntryUnmanaged = struct {
     /// Ending of the address range
     addressEnd: u64,
 
-    pub fn deinit(self: *UMapEntryUnmanaged, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
+    pub fn deinit(self: *UMapEntryUnmanaged, interner: anytype) void {
+        interner.free(self.path);
 
         self.* = undefined;
     }
@@ -130,19 +140,23 @@ pub const UMapUnmanaged = union(enum) {
         backend: std.ArrayListUnmanaged(UMapEntryUnmanaged),
         name: []const u8,
 
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator, interner: *StringInternerUnmanaged) void {
             for (self.backend.items) |item| {
-                allocator.free(item.path);
+                interner.free(item.path);
             }
 
             self.backend.deinit(allocator);
-            allocator.free(self.name);
+            interner.free(self.name);
 
             self.* = undefined;
         }
 
         /// Find an entry given an instruction pointer.
-        pub fn findAndDupe(self: @This(), allocator: std.mem.Allocator, ip: InstructionPointer) !?UMapEntryUnmanaged {
+        pub fn findAndDupe(
+            self: @This(),
+            allocator: std.mem.Allocator,
+            ip: InstructionPointer,
+        ) !?UMapEntryUnmanaged {
             // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
             const index = std.sort.upperBound(UMapEntryUnmanaged, self.backend.items, ip, struct {
                 fn lessThan(lhs_ip: u64, rhs_map: UMapEntryUnmanaged) std.math.Order {
@@ -231,7 +245,7 @@ pub const UMapUnmanaged = union(enum) {
 
     zombie: struct {},
 
-    pub fn init(allocator: std.mem.Allocator, pid: PID) !UMapUnmanaged {
+    pub fn init(allocator: std.mem.Allocator, interner: *StringInternerUnmanaged, pid: PID) !UMapUnmanaged {
         std.log.info("Creating UMap with pid {}...", .{pid});
 
         // Allocate backend
@@ -245,19 +259,31 @@ pub const UMapUnmanaged = union(enum) {
         // NOTE: pure shit vibe code
         const name = blk: {
             var pathBuffer: [256]u8 = undefined;
-            const exe_path = std.fmt.bufPrint(&pathBuffer, "/proc/{}/exe", .{pid}) catch break :blk try allocator.dupe(u8, "unknown");
+            const exe_path = std.fmt.bufPrint(&pathBuffer, "/proc/{}/exe", .{pid}) catch break :blk try interner.dupe(
+                allocator,
+                "unknown",
+            );
 
             var linkBuffer: [std.fs.max_path_bytes]u8 = undefined;
             const full = std.posix.readlinkat(std.posix.AT.FDCWD, exe_path, &linkBuffer) catch {
                 // Fallback to comm
                 var commPathBuf: [256]u8 = undefined;
-                const comm_path = std.fmt.bufPrint(&commPathBuf, "/proc/{}/comm", .{pid}) catch break :blk try allocator.dupe(u8, "unknown");
-                const file = std.fs.openFileAbsolute(comm_path, .{}) catch break :blk try allocator.dupe(u8, "unknown");
+                const comm_path = std.fmt.bufPrint(&commPathBuf, "/proc/{}/comm", .{pid}) catch break :blk try interner.dupe(
+                    allocator,
+                    "unknown",
+                );
+                const file = std.fs.openFileAbsolute(comm_path, .{}) catch break :blk try interner.dupe(
+                    allocator,
+                    "unknown",
+                );
                 defer file.close();
                 var nameBuffer: [16]u8 = undefined;
-                const amt = file.readAll(&nameBuffer) catch break :blk try allocator.dupe(u8, "unknown");
+                const amt = file.readAll(&nameBuffer) catch break :blk try interner.dupe(
+                    allocator,
+                    "unknown",
+                );
                 const raw = std.mem.trimRight(u8, nameBuffer[0..amt], "\n\x00 ");
-                break :blk try allocator.dupe(u8, if (raw.len > 0) raw else "unknown");
+                break :blk try interner.dupe(allocator, if (raw.len > 0) raw else "unknown");
             };
 
             const basename = if (std.mem.lastIndexOfScalar(u8, full, '/')) |idx|
@@ -270,8 +296,8 @@ pub const UMapUnmanaged = union(enum) {
             else
                 basename;
 
-            if (cleaned.len == 0) break :blk try allocator.dupe(u8, "unknown");
-            break :blk try allocator.dupe(u8, cleaned);
+            if (cleaned.len == 0) break :blk try interner.dupe(allocator, "unknown");
+            break :blk try interner.dupe(allocator, cleaned);
         };
         errdefer allocator.free(name);
 
@@ -284,7 +310,7 @@ pub const UMapUnmanaged = union(enum) {
             // It can happen that while we're starting, a process dies. Then we can't load it. In which case we
             // return this "unloaded".
             break :blk std.fs.openFileAbsolute(path, .{}) catch {
-                allocator.free(name);
+                interner.free(name);
                 return .zombie;
             };
         };
@@ -292,7 +318,7 @@ pub const UMapUnmanaged = union(enum) {
 
         // Read the whole file in 1 go
         const content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch {
-            allocator.free(name);
+            interner.free(name);
             return .zombie;
         };
         defer allocator.free(content);
@@ -302,7 +328,7 @@ pub const UMapUnmanaged = union(enum) {
 
         // Populate internals + sort based on instruction pointer enabling binary search. Because we rather show
         // the user something rather than nothing, for now return an unmapped instance.
-        try populate(allocator, &backend, &fbs);
+        try populate(allocator, interner, &backend, &fbs);
         sort(backend.items);
 
         std.log.info("Creating UMap with pid {} OK", .{pid});
@@ -325,7 +351,7 @@ pub const UMapUnmanaged = union(enum) {
     }
 
     test "umap.UMapUnmanaged.sort works as intended" {
-        var inp = [_]UMapEntryUnmanaged {
+        var inp = [_]UMapEntryUnmanaged{
             UMapEntryUnmanaged{
                 .addressBeg = 1,
                 .path = "A",
@@ -348,7 +374,12 @@ pub const UMapUnmanaged = union(enum) {
         try std.testing.expect(std.mem.eql(u8, "A", inp[1].path));
     }
 
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(UMapEntryUnmanaged), reader: anytype) !void {
+    fn populate(
+        allocator: std.mem.Allocator,
+        interner: *StringInternerUnmanaged,
+        backend: *std.ArrayListUnmanaged(UMapEntryUnmanaged),
+        reader: anytype,
+    ) !void {
         // Loop over file contents
         while (true) {
             // Read until we cannot take more lines --> implies EOF
@@ -393,8 +424,8 @@ pub const UMapUnmanaged = union(enum) {
             // Take dll path
             const dllPath = lineIter.rest();
 
-            const ownedPath = try allocator.dupe(u8, dllPath);
-            errdefer allocator.free(ownedPath);
+            const ownedPath = try interner.dupe(allocator, dllPath);
+            errdefer interner.free(ownedPath);
 
             try backend.append(allocator, .{
                 .addressBeg = mapBeg,
@@ -410,14 +441,17 @@ pub const UMapUnmanaged = union(enum) {
             "7f6687c76000-7f6687c77000 rw-p 00003000 103:02 19296183                   /usr/lib/libc.so.6\n" ++
             "7f6687c77000-7f6687c79000 r--p 00000000 103:02 19553864                   /usr/lib/ld-linux.so\n";
 
+        var interner = StringInternerUnmanaged.init();
+        defer interner.deinit(std.testing.allocator);
+
         var backend = std.ArrayListUnmanaged(UMapEntryUnmanaged){};
         defer {
-            for (backend.items) |item| std.testing.allocator.free(item.path);
+            for (backend.items) |item| interner.free(item.path);
             backend.deinit(std.testing.allocator);
         }
 
         var reader = std.Io.Reader.fixed(input);
-        try UMapUnmanaged.populate(std.testing.allocator, &backend, &reader);
+        try UMapUnmanaged.populate(std.testing.allocator, &interner, &backend, &reader);
 
         try std.testing.expectEqual(2, backend.items.len);
         try std.testing.expectEqual(0x7f6687c76000, backend.items[0].addressBeg);
@@ -430,7 +464,9 @@ pub const UMapUnmanaged = union(enum) {
         defer backend.deinit(std.testing.allocator);
 
         var reader = std.Io.Reader.fixed("");
-        try UMapUnmanaged.populate(std.testing.allocator, &backend, &reader);
+        var interner = StringInternerUnmanaged.init();
+        defer interner.deinit(std.testing.allocator);
+        try UMapUnmanaged.populate(std.testing.allocator, &interner, &backend, &reader);
 
         try std.testing.expectEqual(0, backend.items.len);
     }

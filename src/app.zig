@@ -92,7 +92,7 @@ const RingProfilerContext = struct {
         }
 
         // Cannot throw, so panic on error
-        context.iptrieCurrent.add(context.allocator, parsed, &context.umapCache, true) catch {
+        context.iptrieCurrent.add(context.allocator, &context.umapCache, parsed, true) catch {
             @panic("Could not add to stacktrie");
         };
     }
@@ -166,7 +166,7 @@ const FixedContext = struct {
         }
 
         // Cannot throw, so panic on error
-        self.stacktries[self.binCurrent].add(self.allocator, parsed, &self.umapCache, self.enable_pid) catch {
+        self.stacktries[self.binCurrent].add(self.allocator, &self.umapCache, parsed, self.enable_pid) catch {
             @panic("Could not add to stacktrie");
         };
     }

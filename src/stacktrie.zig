@@ -7,6 +7,7 @@ const InstructionPointer = @import("profile.zig").InstructionPointer;
 const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
+const StringInternerUnmanaged = @import("interner.zig").StringInternerUnmanaged;
 
 const ProfilerEventType = @import("profile.zig").ProfilerEventType;
 
@@ -103,6 +104,9 @@ pub const StackTrieUnmanaged = struct {
     /// Maps keys to indices in `nodes`.
     nodesLookup: std.AutoArrayHashMapUnmanaged(Key, NodeId),
 
+    /// String interner to reduce total owned allocations
+    interner: StringInternerUnmanaged,
+
     pub fn init(allocator: std.mem.Allocator) !StackTrieUnmanaged {
         var nodes = try std.ArrayListUnmanaged(TrieNode).initCapacity(allocator, 1024);
 
@@ -126,6 +130,7 @@ pub const StackTrieUnmanaged = struct {
                 &[_]Key{},
                 &[_]NodeId{},
             ),
+            .interner = .init(),
         };
     }
 
@@ -138,19 +143,33 @@ pub const StackTrieUnmanaged = struct {
         try std.testing.expectEqual(StackTrieUnmanaged.RootId, trie.nodes.items[StackTrieUnmanaged.RootId].parent);
     }
 
+    pub fn deinit(self: *StackTrieUnmanaged, allocator: std.mem.Allocator) void {
+        for (self.nodes.items) |node| {
+            switch (node.payload) {
+                .comm => |s| self.interner.free(s),
+                else => {},
+            }
+        }
+        for (self.umaps.items) |*umap| umap.deinit(&self.interner);
+        self.umaps.deinit(allocator);
+        self.nodes.deinit(allocator);
+        self.nodesLookup.deinit(allocator);
+        self.interner.deinit(allocator);
+    }
+
     /// Adds an event to the trie
     pub fn add(
         self: *StackTrieUnmanaged,
         allocator: std.mem.Allocator,
-        event: ProfilerEventType,
         umapCache: *UMapCacheUnmanaged,
+        event: ProfilerEventType,
         enable_pid: bool,
     ) !void {
         const pid = @as(PID, @intCast(event.pid));
         const tid = @as(TID, @intCast(event.tid));
 
         // Obtain the umap
-        const umap = try umapCache.find(allocator, pid);
+        const umap = try umapCache.findOrEmplace(allocator, pid);
         const comm = switch (umap.*) {
             .loaded => |u| u.name,
             .zombie => "nocomm",
@@ -179,7 +198,7 @@ pub const StackTrieUnmanaged = struct {
                     .hitCount = 1,
                     .parent = parent,
                     .payload = TriePayload{
-                        .comm = try allocator.dupe(u8, comm),
+                        .comm = try self.interner.dupe(allocator, comm),
                     },
                 });
 
@@ -284,7 +303,7 @@ pub const StackTrieUnmanaged = struct {
                         e
                     else
                         UMapEntryUnmanaged{
-                            .path = try allocator.dupe(u8, "not found"),
+                            .path = try self.interner.dupe(allocator, "not found"),
                             .offset = 0,
                             .addressBeg = 0,
                             .addressEnd = 0,
@@ -292,14 +311,14 @@ pub const StackTrieUnmanaged = struct {
 
                     // TODO: we flatten our typesystem here, can be improved
                     .zombie => UMapEntryUnmanaged{
-                        .path = try allocator.dupe(u8, "zombie"),
+                        .path = try self.interner.dupe(allocator, "zombie"),
                         .offset = 0,
                         .addressBeg = 0,
                         .addressEnd = 0,
                     },
                 };
 
-                errdefer item.deinit(allocator);
+                errdefer item.deinit(&self.interner);
 
                 // Append it to self
                 try self.umaps.append(allocator, item);
@@ -388,7 +407,7 @@ pub const StackTrieUnmanaged = struct {
             .kips = &[_]u64{ 0xAAAA, 0xBBBB },
         };
 
-        try trie.add(std.testing.allocator, event, &cache, true);
+        try trie.add(std.testing.allocator, &cache, event, true);
 
         // root + 2 kernel frames + pid/tid/comm
         try std.testing.expectEqual(6, trie.nodes.items.len);
@@ -418,8 +437,8 @@ pub const StackTrieUnmanaged = struct {
             .kips = &[_]u64{0xAAAA},
         };
 
-        try trie.add(std.testing.allocator, event, &cache, true);
-        try trie.add(std.testing.allocator, event, &cache, true);
+        try trie.add(std.testing.allocator, &cache, event, true);
+        try trie.add(std.testing.allocator, &cache, event, true);
 
         // Still only root + 1 kernel node (deduped) + pid/tid/comm
         try std.testing.expectEqual(5, trie.nodes.items.len);
@@ -437,8 +456,8 @@ pub const StackTrieUnmanaged = struct {
         for ([_]u64{ 1, 2 }) |pid| {
             try trie.add(
                 std.testing.allocator,
-                .{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} },
                 &cache,
+                .{ .pid = pid, .tid = 0, .timestamp = 0, .uips = &[_]u64{}, .kips = &[_]u64{0xAAAA} },
                 true,
             );
         }
@@ -450,9 +469,11 @@ pub const StackTrieUnmanaged = struct {
 
     /// Remove all entries, but keep root node
     pub fn reset(self: *StackTrieUnmanaged, allocator: std.mem.Allocator) void {
+        _ = allocator;
+
         for (self.nodes.items[1..]) |node| {
             switch (node.payload) {
-                .comm => |s| allocator.free(s),
+                .comm => |s| self.interner.free(s),
                 else => {},
             }
         }
@@ -465,7 +486,7 @@ pub const StackTrieUnmanaged = struct {
         self.nodesLookup.clearRetainingCapacity();
 
         // Keep allocation, but clear entries
-        for (self.umaps.items) |*entry| entry.deinit(allocator);
+        for (self.umaps.items) |*entry| entry.deinit(&self.interner);
         self.umaps.clearRetainingCapacity();
     }
 
@@ -490,16 +511,4 @@ pub const StackTrieUnmanaged = struct {
         try std.testing.expectEqual(0, trie.umaps.items.len);
     }
 
-    pub fn deinit(self: *StackTrieUnmanaged, allocator: std.mem.Allocator) void {
-        for (self.nodes.items) |node| {
-            switch (node.payload) {
-                .comm => |s| allocator.free(s),
-                else => {},
-            }
-        }
-        for (self.umaps.items) |*umap| umap.deinit(allocator);
-        self.umaps.deinit(allocator);
-        self.nodes.deinit(allocator);
-        self.nodesLookup.deinit(allocator);
-    }
 };

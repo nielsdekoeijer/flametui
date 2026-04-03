@@ -71,6 +71,8 @@ const RingProfilerContext = struct {
     }
 
     pub fn callback(context: *RingProfilerContext, event: *const ProfilerEventTypeRaw) void {
+        std.log.info("In CB", .{});
+
         const parsed = ProfilerEventType.init(event);
 
         if (context.binStartNanoseconds) |*binStartNanoseconds| {

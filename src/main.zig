@@ -45,8 +45,10 @@ fn configureProfiler(profiler: anytype, general: Options.GeneralOptions, pid: ?[
     if (pid) |p| {
         const len = @min(32, p.len);
         for (0..len) |i| {
-            profiler.globals.ptrUnsafe().pids[i] = @intCast(p[i]);
+            const target_pid = if (p[i] == -1) std.os.linux.getpid() else p[i];
+            profiler.globals.ptrUnsafe().pids[i] = @intCast(target_pid);
         }
+
         profiler.globals.ptrUnsafe().pids_len = len;
     } else {
         profiler.globals.ptrUnsafe().pids_len = 0;

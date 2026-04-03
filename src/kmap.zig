@@ -12,10 +12,24 @@ pub const KMapEntryUnmanaged = struct {
     /// Instruction pointer corresponding to said symbol
     ip: InstructionPointer,
 
+    /// Free and invalidate
     pub fn deinit(self: *KMapEntryUnmanaged, allocator: std.mem.Allocator) void {
         allocator.free(self.symbol);
 
         self.* = undefined;
+    }
+
+    /// Helper for sorting
+    pub fn lessThanFn(_: void, a: KMapEntryUnmanaged, b: KMapEntryUnmanaged) bool {
+        return a.ip < b.ip;
+    }
+
+    test "KMapEntryUnmanaged.lessThanFn works properly" {
+        const items = [_]KMapEntryUnmanaged{
+            .{ .ip = 200, .symbol = "b" },
+            .{ .ip = 100, .symbol = "a" },
+        };
+        try std.testing.expect(!std.sort.isSorted(KMapEntryUnmanaged, &items, {}, lessThanFn));
     }
 };
 
@@ -24,11 +38,16 @@ pub const KMapUnmanaged = struct {
     /// Kernel map, a model of /proc/kallsyms
     backend: std.ArrayListUnmanaged(KMapEntryUnmanaged),
 
+    /// Reads the symbols from /proc/kallsyms to a file, and then clone the relevant information into an internal 
+    /// representation. 
+    ///
+    /// Recommended to use with an arena allocator as there are many smaller allocations taking place to dupe the 
+    /// symbols defined in /proc/kallsyms. We cannot use any smart caching here as the symbols are by nature unique.
     pub fn init(allocator: std.mem.Allocator) !KMapUnmanaged {
         std.log.info("Populating kernel map...", .{});
 
         // Allocate backend, with a huge size
-        var backend = try std.ArrayListUnmanaged(KMapEntryUnmanaged).initCapacity(allocator, 256_000);
+        var backend = try std.ArrayListUnmanaged(KMapEntryUnmanaged).initCapacity(allocator, 128_000);
 
         {
             // Relates kernel symbols and addresses
@@ -36,16 +55,18 @@ pub const KMapUnmanaged = struct {
             defer file.close();
 
             // Grab the whole file, note that this file is massive (20 MB+) and this just takes a long time.
-            // We assume the kmap static. This likely a big approximation.
+            //
+            // We assume the kmap static. This likely a big approximation as I believe you can add to it with e.g.
+            // eBPF programs! This will just have to be a known limitation because we're not reparsing this.
             const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
             defer allocator.free(content);
 
-            // Populate the arraylist
+            // Populate the arraylist with the file contents
             try populate(allocator, &backend, content);
         }
 
-        // I'm pretty sure we don't have to sort it, but I'm gonna do it anyway
-        if (!isSorted(backend.items)) {
+        // I'm pretty sure we don't have to sort it, but I'm gonna do it anyway because our program fails without it
+        if (!std.sort.isSorted(KMapEntryUnmanaged, backend.items, {}, KMapEntryUnmanaged.lessThanFn)) {
             sort(backend.items);
         }
 
@@ -103,7 +124,8 @@ pub const KMapUnmanaged = struct {
         try std.testing.expectError(error.KMapLookupFailure, kmap.find(50));
     }
 
-    // Helper function that populates the map
+    // Helper function that populates the map from the /proc/kallsyms file
+    //
     // Works as follows, splits into fields:
     // Note that the line has the following structure:
     //
@@ -112,22 +134,26 @@ pub const KMapUnmanaged = struct {
     // <-- 16 chars -->   <-- from index 19 onwards                      -->
     // ```
     //
-    fn populate(allocator: std.mem.Allocator, backend: *std.ArrayListUnmanaged(KMapEntryUnmanaged), content: []const u8) error{OutOfMemory}!void {
+    fn populate(
+        allocator: std.mem.Allocator,
+        backend: *std.ArrayListUnmanaged(KMapEntryUnmanaged),
+        content: []const u8,
+    ) error{ ParseError, OutOfMemory }!void {
         var lines = std.mem.tokenizeScalar(u8, content, '\n');
 
         // Loop through file contents
         while (lines.next()) |line| {
+            // Should never happen, sanity
             if (line.len < 19) {
-                std.log.debug("Unexpected line of length '{}' encountered while parsing kmap", .{line.len});
-                continue;
+                return error.ParseError;
             }
 
             // Grab the address
             const address = std.fmt.parseInt(u64, line[0..16], 16) catch continue;
 
-            // Read the symbol, duplicate our own copy
+            // Read the symbol
             var iter = std.mem.splitScalar(u8, line[19..], '\t');
-            const symbolString = iter.next() orelse continue;
+            const symbolString = iter.next() orelse return error.ParseError;
 
             // Append to our representation
             try backend.append(allocator, KMapEntryUnmanaged{
@@ -156,35 +182,18 @@ pub const KMapUnmanaged = struct {
         const aa = arena.allocator();
         var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
 
-        try KMapUnmanaged.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n");
+        try std.testing.expectError(
+            error.ParseError,
+            KMapUnmanaged.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n"),
+        );
 
         try std.testing.expectEqual(backend.items.len, 0);
-    }
-
-    /// Check if map is sorted, usually it is
-    fn isSorted(items: []const KMapEntryUnmanaged) bool {
-        for (items[1..], 0..) |entry, i| {
-            if (entry.ip < items[i].ip) return false;
-        }
-        return true;
-    }
-
-    test "kmap.KMapUnmanaged.isSorted detects unsorted input" {
-        const items = [_]KMapEntryUnmanaged{
-            .{ .ip = 200, .symbol = "b" },
-            .{ .ip = 100, .symbol = "a" },
-        };
-        try std.testing.expect(!KMapUnmanaged.isSorted(&items));
     }
 
     /// Sorts the map in ascending order for easy binary search
     fn sort(items: []KMapEntryUnmanaged) void {
         // Sort the map so it is easier to search at a later stage
-        std.sort.block(KMapEntryUnmanaged, items, {}, struct {
-            fn lessThan(_: void, a: KMapEntryUnmanaged, b: KMapEntryUnmanaged) bool {
-                return a.ip < b.ip;
-            }
-        }.lessThan);
+        std.sort.block(KMapEntryUnmanaged, items, {}, KMapEntryUnmanaged.lessThanFn);
     }
 
     test "kmap.KMapUnmanaged.sort works as expected" {

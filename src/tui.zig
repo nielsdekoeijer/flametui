@@ -451,6 +451,7 @@ pub const Interface = struct {
         if (self.loop) |*loop| {
             try loop.start();
         }
+
         defer {
             if (self.loop) |*loop| {
                 loop.stop();

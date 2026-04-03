@@ -11,6 +11,8 @@ const StringInternerUnmanaged = @import("interner.zig").StringInternerUnmanaged;
 
 const ProfilerEventType = @import("profile.zig").ProfilerEventType;
 
+/// TODO: 20k mallocs per second, all resolvable by just switching to an arena allocator
+
 /// ===================================================================================================================
 /// StackTrieUnmanaged
 /// ===================================================================================================================
@@ -102,7 +104,7 @@ pub const StackTrieUnmanaged = struct {
     nodes: std.ArrayListUnmanaged(TrieNode),
 
     /// Maps keys to indices in `nodes`.
-    nodesLookup: std.AutoArrayHashMapUnmanaged(Key, NodeId),
+    nodesLookup: std.AutoHashMapUnmanaged(Key, NodeId),
 
     /// String interner to reduce total owned allocations
     interner: StringInternerUnmanaged,
@@ -125,11 +127,12 @@ pub const StackTrieUnmanaged = struct {
         return StackTrieUnmanaged{
             .umaps = try std.ArrayListUnmanaged(UMapEntryUnmanaged).initCapacity(allocator, 1024),
             .nodes = nodes,
-            .nodesLookup = try std.AutoArrayHashMapUnmanaged(Key, NodeId).init(
-                allocator,
-                &[_]Key{},
-                &[_]NodeId{},
-            ),
+            .nodesLookup = .{}, 
+            // try std.AutoHashMapUnmanaged(Key, NodeId).init(
+            //     // allocator,
+            //     &[_]Key{},
+            //     &[_]NodeId{},
+            // ),
             .interner = .init(),
         };
     }
@@ -281,7 +284,7 @@ pub const StackTrieUnmanaged = struct {
         } else {
             // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntryUnmanaged
             var item: UMapEntryUnmanaged = switch (umap.*) {
-                .loaded => |entry| if (try entry.findAndDupe(allocator, ip)) |e|
+                .loaded => |entry| if (try entry.findAndDupe(allocator, &self.interner, ip)) |e|
                     e
                 else
                     UMapEntryUnmanaged{

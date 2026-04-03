@@ -10,7 +10,7 @@ const PID = @import("profile.zig").PID;
 const UMapEntryUnmanaged = @import("umap.zig").UMapEntryUnmanaged;
 const UMapCacheUnmanaged = @import("umap.zig").UMapCacheUnmanaged;
 const UMapUnmanaged = @import("umap.zig").UMapUnmanaged;
-const KMapUnmanaged = @import("kmap.zig").KMapUnmanaged;
+const KMap = @import("kmap.zig").KMap;
 const SymbolTrie = @import("symboltrie.zig").SymbolTrie;
 const StackTrieUnmanaged = @import("stacktrie.zig").StackTrieUnmanaged;
 const ProfilerEventType = @import("profile.zig").ProfilerEventType;
@@ -293,9 +293,9 @@ pub const StackTrieRing = struct {
 /// A list of symbol tries. 
 pub const SymbolTrieList = struct {
     list: ThreadSafe([]*SymbolTrie),
-    kmap: ?*KMapUnmanaged,
+    kmap: ?*KMap,
 
-    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMapUnmanaged, size: usize) !SymbolTrieList {
+    pub fn init(allocator: std.mem.Allocator, kmap: ?*KMap, size: usize) !SymbolTrieList {
         const symboltrieSlice = try allocator.alloc(*SymbolTrie, size);
         errdefer allocator.free(symboltrieSlice);
 
@@ -378,10 +378,7 @@ pub fn ProfilerApp(ContextType: type) type {
         tuiThread: ?std.Thread,
 
         /// KMap for symboltries
-        kmap: *KMapUnmanaged,
-
-        /// KMap allocator, using an arena allocator means way faster deinit and init
-        kmapArena: std.heap.ArenaAllocator,
+        kmap: *KMap,
 
         /// SymbolTries we make available for drawing
         symbols: *SymbolTrieList,
@@ -400,14 +397,10 @@ pub fn ProfilerApp(ContextType: type) type {
             var profiler = try ProfilerUnmanaged.init(ContextType, ContextType.callback, allocator, context);
             errdefer profiler.deinit(allocator);
 
-            // init kmapArena
-            var kmapArena = std.heap.ArenaAllocator.init(allocator);
-            errdefer kmapArena.deinit();
-
             // init kmap
-            const kmap = try allocator.create(KMapUnmanaged);
-            kmap.* = try KMapUnmanaged.init(kmapArena.allocator());
-            errdefer kmap.deinit(kmapArena.allocator());
+            const kmap = try allocator.create(KMap);
+            kmap.* = try KMap.init(allocator);
+            errdefer kmap.deinit();
 
             // init symbol list
             const symbols = try allocator.create(SymbolTrieList);
@@ -424,7 +417,6 @@ pub fn ProfilerApp(ContextType: type) type {
                 .context = context,
                 .profiler = profiler,
                 .kmap = kmap,
-                .kmapArena = kmapArena,
                 .symbols = symbols,
                 .interface = interface,
                 .bpfThread = null,
@@ -435,15 +427,9 @@ pub fn ProfilerApp(ContextType: type) type {
 
         pub fn deinit(self: *@This()) void {
             self.stop();
-
             self.symbols.deinit(self.allocator);
             self.allocator.destroy(self.symbols);
-
-            self.kmap.deinit(self.kmapArena.allocator());
             self.allocator.destroy(self.kmap);
-
-            self.kmapArena.deinit();
-
             self.profiler.deinit(self.allocator);
         }
 

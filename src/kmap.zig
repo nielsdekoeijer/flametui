@@ -34,20 +34,23 @@ pub const KMapEntryUnmanaged = struct {
 };
 
 /// Model of the symbols in /proc/kallsyms
-pub const KMapUnmanaged = struct {
+pub const KMap = struct {
     /// Kernel map, a model of /proc/kallsyms
     backend: std.ArrayListUnmanaged(KMapEntryUnmanaged),
+
+    /// Allocator
+    allocator: std.mem.Allocator,
 
     /// Reads the symbols from /proc/kallsyms to a file, and then clone the relevant information into an internal 
     /// representation. 
     ///
     /// Recommended to use with an arena allocator as there are many smaller allocations taking place to dupe the 
     /// symbols defined in /proc/kallsyms. We cannot use any smart caching here as the symbols are by nature unique.
-    pub fn init(allocator: std.mem.Allocator) !KMapUnmanaged {
+    pub fn init(allocator: std.mem.Allocator) !KMap {
         std.log.info("Populating kernel map...", .{});
 
         // Allocate backend, with a huge size
-        var backend = try std.ArrayListUnmanaged(KMapEntryUnmanaged).initCapacity(allocator, 128_000);
+        var backend = try std.ArrayListUnmanaged(KMapEntryUnmanaged).initCapacity(allocator, 4096);
 
         {
             // Relates kernel symbols and addresses
@@ -74,20 +77,21 @@ pub const KMapUnmanaged = struct {
         backend.shrinkAndFree(allocator, backend.items.len);
 
         std.log.info("Populating kernel map OK", .{});
-        return KMapUnmanaged{
+        return KMap{
             .backend = backend,
+            .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *KMapUnmanaged, allocator: std.mem.Allocator) void {
-        for (self.backend.items) |*item| item.deinit(allocator);
-        self.backend.deinit(allocator);
+    pub fn deinit(self: *KMap) void {
+        for (self.backend.items) |*item| item.deinit(self.allocator);
+        self.backend.deinit(self.allocator);
 
         self.* = undefined;
     }
 
     /// Find an entry given an instruction pointer
-    pub fn find(self: KMapUnmanaged, ip: InstructionPointer) error{KMapLookupFailure}!KMapEntryUnmanaged {
+    pub fn find(self: KMap, ip: InstructionPointer) error{KMapLookupFailure}!KMapEntryUnmanaged {
         // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
         const index = std.sort.upperBound(KMapEntryUnmanaged, self.backend.items, ip, struct {
             fn lessThan(lhs_ip: u64, rhs_map: KMapEntryUnmanaged) std.math.Order {
@@ -107,7 +111,7 @@ pub const KMapUnmanaged = struct {
         return self.backend.items[index - 1];
     }
 
-    test "kmap.KMapUnmanaged.find returns correct symbol" {
+    test "kmap.KMap.find returns correct symbol" {
         std.testing.log_level = .err;
         var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
         defer backend.deinit(std.testing.allocator);
@@ -117,7 +121,7 @@ pub const KMapUnmanaged = struct {
             .{ .ip = 300, .symbol = "c" },
         });
 
-        const kmap = KMapUnmanaged{ .backend = backend };
+        const kmap = KMap{ .backend = backend };
 
         try std.testing.expectEqualStrings("b", (try kmap.find(250)).symbol);
         try std.testing.expectEqualStrings("c", (try kmap.find(350)).symbol);
@@ -163,20 +167,20 @@ pub const KMapUnmanaged = struct {
         }
     }
 
-    test "kmap.KMapUnmanaged.populate parses valid kallsyms lines" {
+    test "kmap.KMap.populate parses valid kallsyms lines" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
         var backend = std.ArrayListUnmanaged(KMapEntryUnmanaged){};
 
-        try KMapUnmanaged.populate(aa, &backend, "ffffffff81000000 T _stext\nffffffff81000010 t helper\n");
+        try KMap.populate(aa, &backend, "ffffffff81000000 T _stext\nffffffff81000010 t helper\n");
 
         try std.testing.expectEqual(backend.items.len, 2);
         try std.testing.expectEqual(backend.items[0].ip, 0xffffffff81000000);
         try std.testing.expectEqualStrings("_stext", backend.items[0].symbol);
     }
 
-    test "kmap.KMapUnmanaged.populate skips short and malformed lines" {
+    test "kmap.KMap.populate skips short and malformed lines" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
@@ -184,7 +188,7 @@ pub const KMapUnmanaged = struct {
 
         try std.testing.expectError(
             error.ParseError,
-            KMapUnmanaged.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n"),
+            KMap.populate(aa, &backend, "short\n\nZZZZZZZZZZZZZZZZ T bad_hex\n"),
         );
 
         try std.testing.expectEqual(backend.items.len, 0);
@@ -196,13 +200,13 @@ pub const KMapUnmanaged = struct {
         std.sort.block(KMapEntryUnmanaged, items, {}, KMapEntryUnmanaged.lessThanFn);
     }
 
-    test "kmap.KMapUnmanaged.sort works as expected" {
+    test "kmap.KMap.sort works as expected" {
         var items = [_]KMapEntryUnmanaged{
             .{ .ip = 200, .symbol = "b" },
             .{ .ip = 100, .symbol = "a" },
         };
 
-        KMapUnmanaged.sort(&items);
+        KMap.sort(&items);
 
         try std.testing.expect(items[0].ip == 100);
         try std.testing.expect(std.mem.eql(u8, items[0].symbol, "a"));

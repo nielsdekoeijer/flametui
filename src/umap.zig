@@ -105,9 +105,13 @@ pub const UMapEntryUnmanaged = struct {
     }
 
     /// Create a deep copy of a given UMapEntry
-    pub fn dupe(self: UMapEntryUnmanaged, allocator: std.mem.Allocator) !UMapEntryUnmanaged {
+    pub fn dupe(
+        self: UMapEntryUnmanaged,
+        allocator: std.mem.Allocator,
+        interner: *StringInternerUnmanaged,
+    ) !UMapEntryUnmanaged {
         return UMapEntryUnmanaged{
-            .path = try allocator.dupe(u8, self.path),
+            .path = try interner.dupe(allocator, self.path),
             .offset = self.offset,
             .addressBeg = self.addressBeg,
             .addressEnd = self.addressEnd,
@@ -155,6 +159,7 @@ pub const UMapUnmanaged = union(enum) {
         pub fn findAndDupe(
             self: @This(),
             allocator: std.mem.Allocator,
+            interner: *StringInternerUnmanaged,
             ip: InstructionPointer,
         ) !?UMapEntryUnmanaged {
             // Find the entry strictly larger than our ip, then the correct symbol will be the preceding
@@ -170,7 +175,7 @@ pub const UMapUnmanaged = union(enum) {
             if (index == 0) return null;
             if (self.backend.items[index - 1].addressEnd < ip) return null;
 
-            return try self.backend.items[index - 1].dupe(allocator);
+            return try self.backend.items[index - 1].dupe(allocator, interner);
         }
 
         test "umap.UMapUnmanaged.loaded.find returns correct entry for IP in range" {

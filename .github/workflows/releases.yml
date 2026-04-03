@@ -54,4 +54,5 @@ jobs:
         with:
           tag_name: rev-${{ steps.slug.outputs.sha8 }}
           name: ${{ steps.slug.outputs.sha8 }}
+          prerelease: true
           files: release/${{ matrix.archive_name }}.tar.gz

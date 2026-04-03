@@ -94,8 +94,8 @@ pub const StackTrieUnmanaged = struct {
     pub const Key = struct { pid: PID, tid: TID, parent: NodeId, ip: InstructionPointer, kind: TrieKind };
 
     /// Contains the entries of the umaps that are in the trie. This is indexed by the UmapId. After resolving a
-    /// UMapEntryUnmanaged from the UMapCacheUnmanaged, we place a copy in this umaps, owning a copy of it. This is critical because
-    /// our UMapCacheUnmanaged may choose to unload a umap for a given pid if it dies.
+    /// UMapEntryUnmanaged from the UMapCacheUnmanaged, we place a copy in this umaps, owning a copy of it.
+    /// This is critical because our UMapCacheUnmanaged may choose to unload a umap for a given pid if it dies.
     umaps: std.ArrayListUnmanaged(UMapEntryUnmanaged),
 
     /// The underlying trie of nodes stored as a flat array. The root node is always the first entry.
@@ -157,6 +157,219 @@ pub const StackTrieUnmanaged = struct {
         self.interner.deinit(allocator);
     }
 
+    fn addCommNode(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        parent: *NodeId,
+        comm: []const u8,
+        key: Key,
+    ) !void {
+        const found = self.nodesLookup.get(key);
+        if (found) |index| {
+            // Hit! Update hitcount of parent that was found
+            self.nodes.items[index].hitCount += 1;
+
+            // Update parent to self for next node
+            parent.* = @intCast(index);
+        } else {
+            // Add a new node
+            try self.nodes.append(allocator, TrieNode{
+                .hitCount = 1,
+                .parent = parent.*,
+                .payload = TriePayload{
+                    .comm = try self.interner.dupe(allocator, comm),
+                },
+            });
+
+            // We compute the NodeId from the length of the node list
+            const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+            // Add the id to the hash map for the given key
+            try self.nodesLookup.put(allocator, key, nodeId);
+
+            // Update parent to be new node
+            parent.* = nodeId;
+        }
+    }
+
+    fn addPIDNode(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        parent: *NodeId,
+        pid: PID,
+        key: Key,
+    ) !void {
+        const found = self.nodesLookup.get(key);
+        if (found) |index| {
+            // Hit! Update hitcount of parent that was found
+            self.nodes.items[index].hitCount += 1;
+
+            // Update parent to self for next node
+            parent.* = @intCast(index);
+        } else {
+            // Add a new node
+            try self.nodes.append(allocator, TrieNode{
+                .hitCount = 1,
+                .parent = parent.*,
+                .payload = TriePayload{
+                    .pid = pid,
+                },
+            });
+
+            // We compute the NodeId from the length of the node list
+            const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+            // Add the id to the hash map for the given key
+            try self.nodesLookup.put(allocator, key, nodeId);
+
+            // Update parent to be new node
+            parent.* = nodeId;
+        }
+    }
+
+    fn addTIDNode(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        parent: *NodeId,
+        tid: TID,
+        key: Key,
+    ) !void {
+        const found = self.nodesLookup.get(key);
+        if (found) |index| {
+            // Hit! Update hitcount of parent that was found
+            self.nodes.items[index].hitCount += 1;
+
+            // Update parent to self for next node
+            parent.* = @intCast(index);
+        } else {
+            // Add a new node
+            try self.nodes.append(allocator, TrieNode{
+                .hitCount = 1,
+                .parent = parent.*,
+                .payload = TriePayload{
+                    .tid = tid,
+                },
+            });
+
+            // We compute the NodeId from the length of the node list
+            const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+            // Add the id to the hash map for the given key
+            try self.nodesLookup.put(allocator, key, nodeId);
+
+            // Update parent to be new node
+            parent.* = nodeId;
+        }
+    }
+
+    fn addUNode(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        parent: *NodeId,
+        umap: *const UMapUnmanaged,
+        ip: InstructionPointer,
+        key: Key,
+    ) !void {
+        // Check if key exists
+        const found = self.nodesLookup.get(key);
+        if (found) |index| {
+            // Hit! Update hitcount of parent that was found
+            self.nodes.items[index].hitCount += 1;
+
+            // Update parent to self for next node
+            parent.* = @intCast(index);
+        } else {
+            // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntryUnmanaged
+            var item: UMapEntryUnmanaged = switch (umap.*) {
+                .loaded => |entry| if (try entry.findAndDupe(allocator, ip)) |e|
+                    e
+                else
+                    UMapEntryUnmanaged{
+                        .path = try self.interner.dupe(allocator, "not found"),
+                        .offset = 0,
+                        .addressBeg = 0,
+                        .addressEnd = 0,
+                    },
+
+                // TODO: we flatten our typesystem here, can be improved
+                .zombie => UMapEntryUnmanaged{
+                    .path = try self.interner.dupe(allocator, "zombie"),
+                    .offset = 0,
+                    .addressBeg = 0,
+                    .addressEnd = 0,
+                },
+            };
+
+            errdefer item.deinit(&self.interner);
+
+            // Append it to self
+            try self.umaps.append(allocator, item);
+
+            // We compute the UmapId from the length of the node list
+            const umapId: UMapId = @intCast(self.umaps.items.len - 1);
+
+            // Add a new node
+            try self.nodes.append(allocator, TrieNode{
+                .hitCount = 1,
+                .parent = parent.*,
+                .payload = TriePayload{
+                    .user = .{
+                        .umapip = ip,
+                        .umapid = umapId,
+                    },
+                },
+            });
+
+            // We compute the NodeId from the length of the node list
+            const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+            // Add the id to the hash map for the given key
+            try self.nodesLookup.put(allocator, key, nodeId);
+
+            // Update parent to be new node
+            parent.* = nodeId;
+        }
+    }
+
+    fn addKNode(
+        self: *StackTrieUnmanaged,
+        allocator: std.mem.Allocator,
+        parent: *NodeId,
+        ip: InstructionPointer,
+        key: Key,
+    ) !void {
+
+        // Check if key exists
+        const found = self.nodesLookup.get(key);
+        if (found) |index| {
+            // Hit! Update hitcount of parent that was found
+            self.nodes.items[index].hitCount += 1;
+
+            // Update parent to self for next node
+            parent.* = @intCast(index);
+        } else {
+            // Miss! Make the node and append it
+            try self.nodes.append(allocator, TrieNode{
+                .hitCount = 1,
+                .parent = parent.*,
+                .payload = TriePayload{
+                    .kernel = .{
+                        .kmapip = ip,
+                    },
+                },
+            });
+
+            // We compute the NodeId from the length of the node list
+            const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
+
+            // Add the id to the hash map for the given key
+            try self.nodesLookup.put(allocator, key, nodeId);
+
+            // Update parent to be new node
+            parent.* = nodeId;
+        }
+    }
+
     /// Adds an event to the trie
     pub fn add(
         self: *StackTrieUnmanaged,
@@ -170,6 +383,7 @@ pub const StackTrieUnmanaged = struct {
 
         // Obtain the umap
         const umap = try umapCache.findOrEmplace(allocator, pid);
+
         const comm = switch (umap.*) {
             .loaded => |u| u.name,
             .zombie => "nocomm",
@@ -182,99 +396,28 @@ pub const StackTrieUnmanaged = struct {
         self.nodes.items[RootId].hitCount += 1;
 
         // Next, we add the comm node
-        {
-            const key = Key{ .kind = .comm, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
+        try self.addCommNode(
+            allocator,
+            &parent,
+            comm,
+            Key{ .kind = .comm, .pid = pid, .tid = tid, .parent = parent, .ip = 0 },
+        );
 
-            const found = self.nodesLookup.get(key);
-            if (found) |index| {
-                // Hit! Update hitcount of parent that was found
-                self.nodes.items[index].hitCount += 1;
-
-                // Update parent to self for next node
-                parent = @intCast(index);
-            } else {
-                // Add a new node
-                try self.nodes.append(allocator, TrieNode{
-                    .hitCount = 1,
-                    .parent = parent,
-                    .payload = TriePayload{
-                        .comm = try self.interner.dupe(allocator, comm),
-                    },
-                });
-
-                // We compute the NodeId from the length of the node list
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-
-                // Add the id to the hash map for the given key
-                try self.nodesLookup.put(allocator, key, nodeId);
-
-                // Update parent to be new node
-                parent = nodeId;
-            }
-        }
-
-        // Next, we add the pid node
+        // Next, we add the pid and tid node
         if (enable_pid) {
-            const key = Key{ .kind = .pid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
+            try self.addPIDNode(
+                allocator,
+                &parent,
+                pid,
+                Key{ .kind = .pid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 },
+            );
 
-            const found = self.nodesLookup.get(key);
-            if (found) |index| {
-                // Hit! Update hitcount of parent that was found
-                self.nodes.items[index].hitCount += 1;
-
-                // Update parent to self for next node
-                parent = @intCast(index);
-            } else {
-                // Add a new node
-                try self.nodes.append(allocator, TrieNode{
-                    .hitCount = 1,
-                    .parent = parent,
-                    .payload = TriePayload{
-                        .pid = pid,
-                    },
-                });
-
-                // We compute the NodeId from the length of the node list
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-
-                // Add the id to the hash map for the given key
-                try self.nodesLookup.put(allocator, key, nodeId);
-
-                // Update parent to be new node
-                parent = nodeId;
-            }
-        }
-
-        // Next, we add the tid node
-        if (enable_pid) {
-            const key = Key{ .kind = .tid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 };
-
-            const found = self.nodesLookup.get(key);
-            if (found) |index| {
-                // Hit! Update hitcount of parent that was found
-                self.nodes.items[index].hitCount += 1;
-
-                // Update parent to self for next node
-                parent = @intCast(index);
-            } else {
-                // Add a new node
-                try self.nodes.append(allocator, TrieNode{
-                    .hitCount = 1,
-                    .parent = parent,
-                    .payload = TriePayload{
-                        .tid = tid,
-                    },
-                });
-
-                // We compute the NodeId from the length of the node list
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-
-                // Add the id to the hash map for the given key
-                try self.nodesLookup.put(allocator, key, nodeId);
-
-                // Update parent to be new node
-                parent = nodeId;
-            }
+            try self.addTIDNode(
+                allocator,
+                &parent,
+                tid,
+                Key{ .kind = .tid, .pid = pid, .tid = tid, .parent = parent, .ip = 0 },
+            );
         }
 
         // Resolve user stack frames. We consider them in reverse as that is the one closest to the root node.
@@ -286,67 +429,13 @@ pub const StackTrieUnmanaged = struct {
             const ip = event.uips[i];
 
             // Build key
-            const key = Key{ .kind = .user, .pid = pid, .tid = tid, .parent = parent, .ip = ip };
-
-            // Check if key exists
-            const found = self.nodesLookup.get(key);
-            if (found) |index| {
-                // Hit! Update hitcount of parent that was found
-                self.nodes.items[index].hitCount += 1;
-
-                // Update parent to self for next node
-                parent = @intCast(index);
-            } else {
-                // Miss! Grab a reference to the UMap, then use the instruction pointer to find the UMapEntryUnmanaged
-                var item: UMapEntryUnmanaged = switch (umap.*) {
-                    .loaded => |entry| if (try entry.findAndDupe(allocator, ip)) |e|
-                        e
-                    else
-                        UMapEntryUnmanaged{
-                            .path = try self.interner.dupe(allocator, "not found"),
-                            .offset = 0,
-                            .addressBeg = 0,
-                            .addressEnd = 0,
-                        },
-
-                    // TODO: we flatten our typesystem here, can be improved
-                    .zombie => UMapEntryUnmanaged{
-                        .path = try self.interner.dupe(allocator, "zombie"),
-                        .offset = 0,
-                        .addressBeg = 0,
-                        .addressEnd = 0,
-                    },
-                };
-
-                errdefer item.deinit(&self.interner);
-
-                // Append it to self
-                try self.umaps.append(allocator, item);
-
-                // We compute the UmapId from the length of the node list
-                const umapId: UMapId = @intCast(self.umaps.items.len - 1);
-
-                // Add a new node
-                try self.nodes.append(allocator, TrieNode{
-                    .hitCount = 1,
-                    .parent = parent,
-                    .payload = TriePayload{
-                        .user = .{
-                            .umapip = ip,
-                            .umapid = umapId,
-                        },
-                    },
-                });
-
-                // We compute the NodeId from the length of the node list
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-
-                // Add the id to the hash map for the given key
-                try self.nodesLookup.put(allocator, key, nodeId);
-
-                // Update parent to be new node
-                parent = nodeId;
-            }
+            try self.addUNode(
+                allocator,
+                &parent,
+                umap,
+                ip,
+                Key{ .kind = .user, .pid = pid, .tid = tid, .parent = parent, .ip = ip },
+            );
         }
 
         // Resolve kernel stack frames
@@ -357,38 +446,13 @@ pub const StackTrieUnmanaged = struct {
             // Grab the kernel instruction pointer
             const ip = event.kips[j];
 
-            // Build the key
-            const key = Key{ .kind = .kernel, .pid = pid, .tid = tid, .parent = parent, .ip = ip };
-
-            // Check if key exists
-            const found = self.nodesLookup.get(key);
-            if (found) |index| {
-                // Hit! Update hitcount of parent that was found
-                self.nodes.items[index].hitCount += 1;
-
-                // Update parent to self for next node
-                parent = @intCast(index);
-            } else {
-                // Miss! Make the node and append it
-                try self.nodes.append(allocator, TrieNode{
-                    .hitCount = 1,
-                    .parent = parent,
-                    .payload = TriePayload{
-                        .kernel = .{
-                            .kmapip = ip,
-                        },
-                    },
-                });
-
-                // We compute the NodeId from the length of the node list
-                const nodeId: NodeId = @intCast(self.nodes.items.len - 1);
-
-                // Add the id to the hash map for the given key
-                try self.nodesLookup.put(allocator, key, nodeId);
-
-                // Update parent to be new node
-                parent = nodeId;
-            }
+            // Build key
+            try self.addKNode(
+                allocator,
+                &parent,
+                ip,
+                Key{ .kind = .kernel, .pid = pid, .tid = tid, .parent = parent, .ip = ip },
+            );
         }
     }
 
@@ -510,5 +574,4 @@ pub const StackTrieUnmanaged = struct {
         try std.testing.expectEqual(0, trie.nodesLookup.count());
         try std.testing.expectEqual(0, trie.umaps.items.len);
     }
-
 };
